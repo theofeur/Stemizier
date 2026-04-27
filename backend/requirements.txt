@@ -1,0 +1,17 @@
+# Core
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+python-multipart>=0.0.20
+
+# Audio processing
+soundfile>=0.13.0
+pydub>=0.25.1
+librosa>=0.10.2
+numpy>=2.0.0
+
+# AI — Demucs (Meta's music source separation)
+demucs>=4.0.1
+torch>=2.0.0
+torchaudio>=2.0.0

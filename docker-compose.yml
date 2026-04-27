@@ -1,0 +1,29 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - upload_data:/app/storage/uploads
+      - output_data:/app/storage/outputs
+    environment:
+      - DEBUG=false
+      - DEMUCS_MODEL=htdemucs_6s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  upload_data:
+  output_data:
