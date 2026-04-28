@@ -18,7 +18,10 @@ import logging
 import numpy as np
 import soundfile as sf
 from pathlib import Path
+from typing import Callable
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
+from tqdm import tqdm as _original_tqdm
 
 from app.config import settings
 from app.core.audio import load_audio, save_audio, slice_audio, replace_segment
@@ -34,6 +37,23 @@ logger = logging.getLogger(__name__)
 
 # Cached separator instances per model
 _separators: dict[str, object] = {}
+
+# Thread-local progress callback for intercepting tqdm
+import threading
+_progress_local = threading.local()
+
+
+class _ProgressTqdm(_original_tqdm):
+    """A tqdm subclass that reports progress to a callback."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def update(self, n=1):
+        super().update(n)
+        cb = getattr(_progress_local, "callback", None)
+        if cb and self.total:
+            cb(self.n, self.total)
 
 
 def _get_separator(model_filename: str):
@@ -74,7 +94,10 @@ def _resolve_output_path(out_file: str) -> Path:
     raise FileNotFoundError(f"Cannot find output file: {out_file} (tried {resolved})")
 
 
-def separate_track(file_path: Path) -> dict[str, np.ndarray]:
+def separate_track(
+    file_path: Path,
+    progress_callback: Callable[[int], None] | None = None,
+) -> dict[str, np.ndarray]:
     """
     Separate a full audio track into stems using a multi-model pipeline.
 
@@ -83,15 +106,38 @@ def separate_track(file_path: Path) -> dict[str, np.ndarray]:
     2. Demucs htdemucs_ft on instrumental → drums, bass, other
 
     Returns dict mapping stem name -> numpy array (samples, channels).
+    progress_callback receives an integer 0-100 representing overall progress.
     """
     logger.info(f"Starting stem separation for: {file_path.name}")
     results: dict[str, np.ndarray] = {}
+
+    def _report(pct: int):
+        if progress_callback:
+            progress_callback(pct)
+
+    def _step1_tqdm_cb(current: int, total: int):
+        # Step 1 maps to 10-50% of overall progress
+        pct = 10 + int((current / total) * 40)
+        _report(pct)
+
+    def _step2_tqdm_cb(current: int, total: int):
+        # Step 2 maps to 55-90% of overall progress
+        pct = 55 + int((current / total) * 35)
+        _report(pct)
 
     # --- Step 1: BS-RoFormer for vocals/instrumental ---
     vocal_model = settings.stem_models["vocals"]
     separator = _get_separator(vocal_model)
     logger.info("Step 1/2: Separating vocals with BS-RoFormer...")
-    output_files = separator.separate(str(file_path))
+    _report(10)
+
+    _progress_local.callback = _step1_tqdm_cb
+    try:
+        output_files = separator.separate(str(file_path))
+    finally:
+        _progress_local.callback = None
+
+    _report(50)
     logger.info(f"BS-RoFormer output files: {output_files}")
 
     # audio-separator returns list of output file paths
@@ -120,7 +166,15 @@ def separate_track(file_path: Path) -> dict[str, np.ndarray]:
     demucs_model = settings.stem_models["drums"]  # htdemucs_ft handles all 4 stems
     separator2 = _get_separator(demucs_model)
     logger.info("Step 2/2: Separating drums/bass/other with Demucs...")
-    output_files2 = separator2.separate(str(instrumental_path))
+    _report(55)
+
+    _progress_local.callback = _step2_tqdm_cb
+    try:
+        output_files2 = separator2.separate(str(instrumental_path))
+    finally:
+        _progress_local.callback = None
+
+    _report(90)
     logger.info(f"Demucs output files: {output_files2}")
 
     for out_file in output_files2:
@@ -282,9 +336,16 @@ def _run_separation(job_id: str, track_id: str, track_path: Path):
     job = _separation_jobs[job_id]
     try:
         job.status = ProcessingStatus.SEPARATING
-        job.progress = 10
+        job.progress = 5
 
-        stems = separate_track(track_path)
+        def _update_progress(pct: int):
+            job.progress = min(pct, 95)
+
+        # Patch tqdm in all modules that use it so we capture iteration progress
+        with patch("audio_separator.separator.architectures.mdxc_separator.tqdm", _ProgressTqdm), \
+             patch("audio_separator.separator.uvr_lib_v5.demucs.apply.tqdm.tqdm", _ProgressTqdm), \
+             patch("tqdm.tqdm", _ProgressTqdm):
+            stems = separate_track(track_path, progress_callback=_update_progress)
 
         # Get sample rate from original file
         info = sf.info(str(track_path))

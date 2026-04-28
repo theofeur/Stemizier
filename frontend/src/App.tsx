@@ -146,7 +146,7 @@ export default function App() {
           clearInterval(poll);
           setLoadingPhase("idle");
         }
-      }, 2000);
+      }, 1000);
     } catch (err) {
       console.error("Separation failed:", err);
       setLoadingPhase("idle");
