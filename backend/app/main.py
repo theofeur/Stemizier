@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.app_name}")
-    logger.info(f"Demucs model: {settings.demucs_model}")
+    logger.info(f"Stem models: {settings.stem_models}")
     logger.info(f"Upload dir: {settings.upload_dir.resolve()}")
     logger.info(f"Output dir: {settings.output_dir.resolve()}")
     yield

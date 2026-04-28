@@ -43,9 +43,11 @@ def _get_separator(model_filename: str):
     from audio_separator.separator import Separator
 
     logger.info(f"Loading model: {model_filename}")
+
+    output_dir = str(settings.output_dir.resolve())
     separator = Separator(
-        model_file_dir=str(settings.model_dir),
-        output_dir=str(settings.output_dir),
+        model_file_dir=str(settings.model_dir.resolve()),
+        output_dir=output_dir,
         output_format="WAV",
         sample_rate=settings.sample_rate,
         normalization_threshold=1.0,  # No normalization — preserve dynamics
@@ -54,6 +56,21 @@ def _get_separator(model_filename: str):
     _separators[model_filename] = separator
     logger.info(f"Model loaded: {model_filename}")
     return separator
+
+
+def _resolve_output_path(out_file: str) -> Path:
+    """Resolve an output file path from audio-separator (may be relative or just a filename)."""
+    out_path = Path(out_file)
+    if out_path.is_absolute() and out_path.exists():
+        return out_path
+    # audio-separator often returns just the filename — resolve against output_dir
+    resolved = settings.output_dir.resolve() / out_path.name
+    if resolved.exists():
+        return resolved
+    # Try as-is
+    if out_path.exists():
+        return out_path
+    raise FileNotFoundError(f"Cannot find output file: {out_file} (tried {resolved})")
 
 
 def separate_track(file_path: Path) -> dict[str, np.ndarray]:
@@ -78,8 +95,9 @@ def separate_track(file_path: Path) -> dict[str, np.ndarray]:
 
     # audio-separator returns list of output file paths
     # BS-RoFormer produces: [vocals_path, instrumental_path]
+    instrumental_path = None
     for out_file in output_files:
-        out_path = Path(out_file)
+        out_path = _resolve_output_path(out_file)
         data, sr = sf.read(str(out_path), dtype="float32", always_2d=True)
         name = out_path.stem.lower()
         if "vocal" in name:
@@ -105,7 +123,7 @@ def separate_track(file_path: Path) -> dict[str, np.ndarray]:
     logger.info(f"Demucs output files: {output_files2}")
 
     for out_file in output_files2:
-        out_path = Path(out_file)
+        out_path = _resolve_output_path(out_file)
         data, sr = sf.read(str(out_path), dtype="float32", always_2d=True)
         name = out_path.stem.lower()
         if "drum" in name:
