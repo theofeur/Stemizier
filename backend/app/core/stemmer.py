@@ -1,17 +1,22 @@
 """
-AI-powered stem separation engine using Meta's Demucs.
+AI-powered stem separation engine using UVR5 / BS-RoFormer.
 
-Demucs htdemucs_6s model separates audio into 6 stems:
-  - vocals, drums, bass, guitar, piano, other
+Uses the `audio-separator` library (python-audio-separator) which wraps
+the Ultimate Vocal Remover models. The pipeline:
 
-This is ideal for electronic music where you need fine-grained control
-over synths (other), keys (piano), pads (guitar/other), drums, bass, and vocals.
+1. BS-RoFormer (best-in-class vocal separation, SDR 12.97) for vocals/instrumental
+2. Demucs htdemucs_ft via audio-separator for drums/bass/other from the instrumental
+
+This gives high-quality electronic music stem separation:
+  - vocals (BS-RoFormer)
+  - drums, bass, other (Demucs from instrumental)
+  - instrumental (full instrumental from BS-RoFormer)
 """
 
 import uuid
 import logging
 import numpy as np
-import torch
+import soundfile as sf
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -26,76 +31,93 @@ from app.core.models import (
 
 logger = logging.getLogger(__name__)
 
-# Global model cache — loaded once, reused across requests
-_model = None
-_model_lock = None
+# Cached separator instances per model
+_separators: dict[str, object] = {}
 
 
-def _get_device() -> torch.device:
-    """Select the best available compute device."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+def _get_separator(model_filename: str):
+    """Get or create a cached Separator instance for the given model."""
+    if model_filename in _separators:
+        return _separators[model_filename]
 
+    from audio_separator.separator import Separator
 
-def load_model():
-    """Load the Demucs model (lazy singleton)."""
-    global _model
-    if _model is not None:
-        return _model
-
-    from demucs.pretrained import get_model
-    from demucs.apply import apply_model
-
-    logger.info(f"Loading Demucs model: {settings.demucs_model}")
-    device = _get_device()
-    logger.info(f"Using device: {device}")
-
-    model = get_model(settings.demucs_model)
-    model.to(device)
-    model.eval()
-    _model = model
-    logger.info(f"Demucs model loaded successfully. Sources: {model.sources}")
-    return _model
+    logger.info(f"Loading model: {model_filename}")
+    separator = Separator(
+        model_file_dir=str(settings.model_dir),
+        output_dir=str(settings.output_dir),
+        output_format="WAV",
+        sample_rate=settings.sample_rate,
+        normalization_threshold=1.0,  # No normalization — preserve dynamics
+    )
+    separator.load_model(model_filename=model_filename)
+    _separators[model_filename] = separator
+    logger.info(f"Model loaded: {model_filename}")
+    return separator
 
 
 def separate_track(file_path: Path) -> dict[str, np.ndarray]:
     """
-    Separate a full audio track into stems.
-    Returns dict mapping stem name -> numpy array of audio data.
+    Separate a full audio track into stems using a multi-model pipeline.
+
+    Pipeline:
+    1. BS-RoFormer → vocals + instrumental
+    2. Demucs htdemucs_ft on instrumental → drums, bass, other
+
+    Returns dict mapping stem name -> numpy array (samples, channels).
     """
-    from demucs.apply import apply_model
-    from demucs.audio import AudioFile
+    logger.info(f"Starting stem separation for: {file_path.name}")
+    results: dict[str, np.ndarray] = {}
 
-    model = load_model()
-    device = _get_device()
+    # --- Step 1: BS-RoFormer for vocals/instrumental ---
+    vocal_model = settings.stem_models["vocals"]
+    separator = _get_separator(vocal_model)
+    logger.info("Step 1/2: Separating vocals with BS-RoFormer...")
+    output_files = separator.separate(str(file_path))
+    logger.info(f"BS-RoFormer output files: {output_files}")
 
-    logger.info(f"Separating stems for: {file_path.name}")
+    # audio-separator returns list of output file paths
+    # BS-RoFormer produces: [vocals_path, instrumental_path]
+    for out_file in output_files:
+        out_path = Path(out_file)
+        data, sr = sf.read(str(out_path), dtype="float32", always_2d=True)
+        name = out_path.stem.lower()
+        if "vocal" in name:
+            results["vocals"] = data
+        elif "instrumental" in name or "instrum" in name:
+            results["instrumental"] = data
+            instrumental_path = out_path
+        else:
+            # Fallback: second file is usually instrumental
+            results["instrumental"] = data
+            instrumental_path = out_path
 
-    # Load audio as tensor: (channels, samples)
-    wav = AudioFile(file_path).read(streams=0, samplerate=model.samplerate, channels=model.audio_channels)
-    ref = wav.mean(0)
-    wav = (wav - ref.mean()) / ref.std()
-    wav = wav.unsqueeze(0).to(device)  # (1, channels, samples)
+    if "instrumental" not in results:
+        logger.warning("No instrumental stem found, using original as fallback")
+        results["instrumental"], _ = load_audio(file_path)
+        instrumental_path = file_path
 
-    # Run the model
-    with torch.no_grad():
-        sources = apply_model(model, wav, device=device)
-    # sources shape: (1, num_sources, channels, samples)
+    # --- Step 2: Demucs on instrumental for drums/bass/other ---
+    demucs_model = settings.stem_models["drums"]  # htdemucs_ft handles all 4 stems
+    separator2 = _get_separator(demucs_model)
+    logger.info("Step 2/2: Separating drums/bass/other with Demucs...")
+    output_files2 = separator2.separate(str(instrumental_path))
+    logger.info(f"Demucs output files: {output_files2}")
 
-    # Denormalize
-    sources = sources * ref.std() + ref.mean()
+    for out_file in output_files2:
+        out_path = Path(out_file)
+        data, sr = sf.read(str(out_path), dtype="float32", always_2d=True)
+        name = out_path.stem.lower()
+        if "drum" in name:
+            results["drums"] = data
+        elif "bass" in name:
+            results["bass"] = data
+        elif "other" in name:
+            results["other"] = data
+        # Skip vocals from demucs (we already have better ones from BS-RoFormer)
 
-    result = {}
-    for i, source_name in enumerate(model.sources):
-        # (channels, samples) -> (samples, channels)
-        audio_np = sources[0, i].cpu().numpy().T
-        result[source_name] = audio_np
-
-    logger.info(f"Separation complete. Stems: {list(result.keys())}")
-    return result
+    logger.info(f"Separation complete. Stems: {list(results.keys())}")
+    return results
 
 
 def apply_operations(

@@ -90,7 +90,7 @@ interface StemControlsProps {
 }
 
 export function StemControls({ onStemSelect, activeStem }: StemControlsProps) {
-  const stems: StemType[] = ["vocals", "drums", "bass", "guitar", "piano", "other"];
+  const stems: StemType[] = ["vocals", "drums", "bass", "other", "instrumental"];
 
   return (
     <div className="card">

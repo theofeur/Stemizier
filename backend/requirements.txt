@@ -11,7 +11,7 @@ pydub>=0.25.1
 librosa>=0.10.2
 numpy>=2.0.0
 
-# AI — Demucs (Meta's music source separation)
-demucs>=4.0.1
+# AI — UVR5 / BS-RoFormer stem separation
+audio-separator[cpu]>=0.44.0
 torch>=2.0.0
 torchaudio>=2.0.0
