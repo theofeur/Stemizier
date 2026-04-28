@@ -4,6 +4,7 @@ import {
   useCallback,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type WheelEvent as ReactWheelEvent,
 } from "react";
 import type { StemType, TimeRange, StemOperation } from "../types";
 import { STEM_COLORS, STEM_LABELS } from "../types";
@@ -12,18 +13,19 @@ import { STEM_COLORS, STEM_LABELS } from "../types";
 
 const WAVEFORM_HEIGHT = 140;
 const OPS_BAR_HEIGHT = 18;
+const SCROLLBAR_HEIGHT = 10;
 const TOTAL_HEIGHT = WAVEFORM_HEIGHT + OPS_BAR_HEIGHT + 6; // 6px gap
 const BAR_GAP = 1;
 const HANDLE_WIDTH = 8;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 50;
 
 const DRAW_ORDER: StemType[] = ["other", "bass", "drums", "vocals"];
 
 /* ── Props ─────────────────────────────────────────────────────────────── */
 
 interface WaveformEditorProps {
-  /** Original audio peaks (shown before stems are loaded) */
   originalPeaks: Float32Array | null;
-  /** Per-stem peaks (shown once stems are separated) */
   stemPeaks: Record<string, Float32Array> | null;
   duration: number;
   currentTime: number;
@@ -42,16 +44,17 @@ type DragState =
   | { type: "creating"; anchorTime: number }
   | { type: "resizing-start"; originalEnd: number }
   | { type: "resizing-end"; originalStart: number }
-  | { type: "moving"; offset: number; rangeWidth: number };
-
-function timeToX(time: number, duration: number, width: number): number {
-  return (time / duration) * width;
-}
-function xToTime(x: number, duration: number, width: number): number {
-  return Math.max(0, Math.min(duration, (x / width) * duration));
-}
+  | { type: "moving"; offset: number; rangeWidth: number }
+  | { type: "scrollbar"; startX: number; startOffset: number };
 
 function formatTime(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  const ms = Math.floor((sec % 1) * 100);
+  return `${m}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
+}
+
+function formatTimeShort(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
@@ -81,12 +84,38 @@ export default function WaveformEditor({
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cursorRef = useRef<HTMLDivElement>(null);
+  const scrollbarRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState>({ type: "none" });
   const [canvasWidth, setCanvasWidth] = useState(0);
   const dragRef = useRef<DragState>({ type: "none" });
 
+  // Zoom/scroll state
+  const [zoom, setZoom] = useState(1);
+  const [viewOffset, setViewOffset] = useState(0);
+
   // Keep dragRef in sync
   dragRef.current = drag;
+
+  // Derived: visible time window
+  const visibleDuration = duration / zoom;
+  const viewStart = viewOffset;
+  const viewEnd = viewOffset + visibleDuration;
+
+  // Coordinate helpers (viewport-aware)
+  const timeToX = useCallback(
+    (time: number): number => {
+      return ((time - viewStart) / visibleDuration) * canvasWidth;
+    },
+    [viewStart, visibleDuration, canvasWidth]
+  );
+
+  const xToTime = useCallback(
+    (x: number): number => {
+      const t = viewStart + (x / canvasWidth) * visibleDuration;
+      return Math.max(0, Math.min(duration, t));
+    },
+    [viewStart, visibleDuration, canvasWidth, duration]
+  );
 
   /* ── Canvas sizing ─────────────────────────────────────────────────── */
 
@@ -101,6 +130,16 @@ export default function WaveformEditor({
     return () => obs.disconnect();
   }, []);
 
+  /* ── Keep view following playhead ──────────────────────────────────── */
+
+  useEffect(() => {
+    if (!isPlaying || zoom <= 1) return;
+    if (currentTime < viewStart || currentTime > viewEnd - visibleDuration * 0.1) {
+      const newOffset = Math.max(0, Math.min(duration - visibleDuration, currentTime - visibleDuration * 0.1));
+      setViewOffset(newOffset);
+    }
+  }, [currentTime, isPlaying, zoom, viewStart, viewEnd, visibleDuration, duration]);
+
   /* ── Draw waveform ─────────────────────────────────────────────────── */
 
   useEffect(() => {
@@ -112,8 +151,6 @@ export default function WaveformEditor({
     canvas.height = TOTAL_HEIGHT * dpr;
     const ctx = canvas.getContext("2d")!;
     ctx.scale(dpr, dpr);
-
-    // Clear
     ctx.clearRect(0, 0, canvasWidth, TOTAL_HEIGHT);
 
     const centerY = WAVEFORM_HEIGHT / 2;
@@ -121,115 +158,144 @@ export default function WaveformEditor({
 
     const hasStemPeaks = stemPeaks && Object.keys(stemPeaks).length > 0;
 
+    const drawPeaks = (peaks: Float32Array, color: string) => {
+      ctx.fillStyle = color;
+      const numBars = peaks.length;
+      const startIdx = Math.floor((viewStart / duration) * numBars);
+      const endIdx = Math.ceil((viewEnd / duration) * numBars);
+      const visibleBars = endIdx - startIdx;
+      const barWidth = Math.max(canvasWidth / visibleBars - BAR_GAP, 1);
+
+      for (let i = startIdx; i < endIdx && i < numBars; i++) {
+        const barHeight = (peaks[i] ?? 0) * maxBarHeight;
+        if (barHeight < 0.5) continue;
+        const x = ((i - startIdx) / visibleBars) * canvasWidth;
+        ctx.fillRect(x, centerY - barHeight, barWidth, barHeight * 2);
+      }
+    };
+
     if (hasStemPeaks) {
-      // Draw multi-colored stem waveforms
       for (const stemName of DRAW_ORDER) {
         const peaks = stemPeaks[stemName];
         if (!peaks) continue;
-
-        const color = STEM_COLORS[stemName as StemType];
-        ctx.fillStyle = hexToRgba(color, 0.55);
-
-        const numBars = peaks.length;
-        const barWidth = Math.max(canvasWidth / numBars - BAR_GAP, 1);
-
-        for (let i = 0; i < numBars; i++) {
-          const barHeight = (peaks[i] ?? 0) * maxBarHeight;
-          if (barHeight < 0.5) continue;
-          const x = (i / numBars) * canvasWidth;
-          ctx.fillRect(x, centerY - barHeight, barWidth, barHeight * 2);
-        }
+        drawPeaks(peaks, hexToRgba(STEM_COLORS[stemName as StemType], 0.55));
       }
     } else if (originalPeaks) {
-      // Draw single-color original waveform
-      ctx.fillStyle = "#4a4a6a";
-      const numBars = originalPeaks.length;
-      const barWidth = Math.max(canvasWidth / numBars - BAR_GAP, 1);
+      drawPeaks(originalPeaks, "#4a4a6a");
+    }
 
-      for (let i = 0; i < numBars; i++) {
-        const barHeight = (originalPeaks[i] ?? 0) * maxBarHeight;
-        if (barHeight < 0.5) continue;
-        const x = (i / numBars) * canvasWidth;
-        ctx.fillRect(x, centerY - barHeight, barWidth, barHeight * 2);
+    // ── Region highlight ──────────────────────────────────────────────
+    if (region) {
+      const rx = timeToX(region.start);
+      const rw = timeToX(region.end) - rx;
+
+      if (rx < canvasWidth && rx + rw > 0) {
+        const clampedRx = Math.max(0, rx);
+        const clampedEnd = Math.min(canvasWidth, rx + rw);
+
+        ctx.fillStyle = "rgba(0,0,0,0.35)";
+        ctx.fillRect(0, 0, clampedRx, WAVEFORM_HEIGHT);
+        ctx.fillRect(clampedEnd, 0, canvasWidth - clampedEnd, WAVEFORM_HEIGHT);
+
+        ctx.strokeStyle = "#7c3aed";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(clampedRx, 0, clampedEnd - clampedRx, WAVEFORM_HEIGHT);
+
+        ctx.fillStyle = "#7c3aed";
+        if (rx >= 0 && rx <= canvasWidth) ctx.fillRect(rx - 2, 0, 4, WAVEFORM_HEIGHT);
+        if (rx + rw >= 0 && rx + rw <= canvasWidth) ctx.fillRect(rx + rw - 2, 0, 4, WAVEFORM_HEIGHT);
+
+        ctx.font = "11px monospace";
+        ctx.fillStyle = "#c4b5fd";
+        if (clampedRx > 0) {
+          ctx.textAlign = "left";
+          ctx.fillText(formatTime(region.start), clampedRx + 6, 14);
+        }
+        if (clampedEnd < canvasWidth) {
+          ctx.textAlign = "right";
+          ctx.fillText(formatTime(region.end), clampedEnd - 6, 14);
+        }
       }
     }
 
-    // ── Draw region highlight ─────────────────────────────────────────
-    if (region) {
-      const rx = timeToX(region.start, duration, canvasWidth);
-      const rw = timeToX(region.end, duration, canvasWidth) - rx;
-
-      // Darken areas outside the region
-      ctx.fillStyle = "rgba(0,0,0,0.35)";
-      ctx.fillRect(0, 0, rx, WAVEFORM_HEIGHT);
-      ctx.fillRect(rx + rw, 0, canvasWidth - rx - rw, WAVEFORM_HEIGHT);
-
-      // Region border
-      ctx.strokeStyle = "#7c3aed";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(rx, 0, rw, WAVEFORM_HEIGHT);
-
-      // Handles
-      ctx.fillStyle = "#7c3aed";
-      ctx.fillRect(rx - 2, 0, 4, WAVEFORM_HEIGHT);
-      ctx.fillRect(rx + rw - 2, 0, 4, WAVEFORM_HEIGHT);
-
-      // Region time labels
-      ctx.font = "11px monospace";
-      ctx.fillStyle = "#c4b5fd";
-      ctx.textAlign = "left";
-      ctx.fillText(formatTime(region.start), rx + 6, 14);
-      ctx.textAlign = "right";
-      ctx.fillText(formatTime(region.end), rx + rw - 6, 14);
-    }
-
-    // ── Draw operations bar ───────────────────────────────────────────
+    // ── Operations bar ────────────────────────────────────────────────
     const opsY = WAVEFORM_HEIGHT + 6;
     ctx.fillStyle = "rgba(255,255,255,0.03)";
     ctx.fillRect(0, opsY, canvasWidth, OPS_BAR_HEIGHT);
 
     for (const op of operations) {
-      const ox = timeToX(op.time_range.start, duration, canvasWidth);
-      const ow =
-        timeToX(op.time_range.end, duration, canvasWidth) - ox;
+      const ox = timeToX(op.time_range.start);
+      const ow = timeToX(op.time_range.end) - ox;
+      if (ox > canvasWidth || ox + ow < 0) continue;
+
       const color = STEM_COLORS[op.stem];
+      const drawX = Math.max(0, ox);
+      const drawW = Math.min(ox + ow, canvasWidth) - drawX;
 
       if (op.action === "remove") {
-        // Striped pattern for remove
         ctx.fillStyle = hexToRgba(color, 0.4);
-        ctx.fillRect(ox, opsY, ow, OPS_BAR_HEIGHT);
+        ctx.fillRect(drawX, opsY, drawW, OPS_BAR_HEIGHT);
         ctx.strokeStyle = hexToRgba(color, 0.7);
         ctx.lineWidth = 1;
-        for (let sx = ox; sx < ox + ow; sx += 6) {
+        for (let sx = drawX; sx < drawX + drawW; sx += 6) {
           ctx.beginPath();
           ctx.moveTo(sx, opsY);
           ctx.lineTo(sx + OPS_BAR_HEIGHT, opsY + OPS_BAR_HEIGHT);
           ctx.stroke();
         }
       } else {
-        // Solid for isolate
         ctx.fillStyle = hexToRgba(color, 0.6);
-        ctx.fillRect(ox, opsY, ow, OPS_BAR_HEIGHT);
+        ctx.fillRect(drawX, opsY, drawW, OPS_BAR_HEIGHT);
       }
 
-      // Label
-      ctx.font = "9px sans-serif";
-      ctx.fillStyle = "#fff";
-      ctx.textAlign = "center";
-      if (ow > 30) {
+      if (drawW > 30) {
+        ctx.font = "9px sans-serif";
+        ctx.fillStyle = "#fff";
+        ctx.textAlign = "center";
         const label = `${op.action === "remove" ? "−" : "♪"} ${STEM_LABELS[op.stem].split(" ")[0]}`;
-        ctx.fillText(label, ox + ow / 2, opsY + 13);
+        ctx.fillText(label, drawX + drawW / 2, opsY + 13);
       }
     }
-  }, [canvasWidth, originalPeaks, stemPeaks, duration, region, operations]);
+  }, [canvasWidth, originalPeaks, stemPeaks, duration, region, operations, zoom, viewOffset, timeToX, viewStart, viewEnd]);
 
   /* ── Cursor ────────────────────────────────────────────────────────── */
 
   useEffect(() => {
     if (!cursorRef.current || duration === 0 || canvasWidth === 0) return;
-    const pct = (currentTime / duration) * 100;
-    cursorRef.current.style.left = `${pct}%`;
-  }, [currentTime, duration, canvasWidth]);
+    const x = timeToX(currentTime);
+    cursorRef.current.style.left = `${x}px`;
+    cursorRef.current.style.display = x >= 0 && x <= canvasWidth ? "block" : "none";
+  }, [currentTime, duration, canvasWidth, timeToX]);
+
+  /* ── Zoom (Ctrl+wheel) / Pan (wheel) ───────────────────────────────── */
+
+  const handleWheel = useCallback(
+    (e: ReactWheelEvent) => {
+      e.preventDefault();
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      const mouseX = e.clientX - rect.left;
+      const mouseTime = xToTime(mouseX);
+
+      if (e.ctrlKey || e.metaKey) {
+        const zoomFactor = e.deltaY < 0 ? 1.3 : 1 / 1.3;
+        const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom * zoomFactor));
+        const newVisibleDuration = duration / newZoom;
+        const mouseRatio = mouseX / canvasWidth;
+        const newOffset = mouseTime - mouseRatio * newVisibleDuration;
+        const clampedOffset = Math.max(0, Math.min(duration - newVisibleDuration, newOffset));
+
+        setZoom(newZoom);
+        setViewOffset(clampedOffset);
+      } else {
+        const scrollAmount = (e.deltaY / canvasWidth) * visibleDuration * 3;
+        const newOffset = Math.max(0, Math.min(duration - visibleDuration, viewOffset + scrollAmount));
+        setViewOffset(newOffset);
+      }
+    },
+    [zoom, viewOffset, duration, visibleDuration, canvasWidth, xToTime]
+  );
 
   /* ── Mouse interaction ─────────────────────────────────────────────── */
 
@@ -238,9 +304,9 @@ export default function WaveformEditor({
       if (!canvasRef.current) return 0;
       const rect = canvasRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      return xToTime(x, duration, rect.width);
+      return xToTime(x);
     },
-    [duration]
+    [xToTime]
   );
 
   const hitTest = useCallback(
@@ -248,15 +314,15 @@ export default function WaveformEditor({
       if (!region || !canvasRef.current) return "outside";
       const rect = canvasRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      const startX = timeToX(region.start, duration, rect.width);
-      const endX = timeToX(region.end, duration, rect.width);
+      const startX = timeToX(region.start);
+      const endX = timeToX(region.end);
 
       if (Math.abs(x - startX) < HANDLE_WIDTH) return "start-handle";
       if (Math.abs(x - endX) < HANDLE_WIDTH) return "end-handle";
       if (x > startX && x < endX) return "inside";
       return "outside";
     },
-    [region, duration]
+    [region, timeToX]
   );
 
   const handleMouseDown = useCallback(
@@ -276,7 +342,6 @@ export default function WaveformEditor({
           rangeWidth: region.end - region.start,
         });
       } else {
-        // Start creating a new region
         setDrag({ type: "creating", anchorTime: time });
       }
     },
@@ -286,8 +351,19 @@ export default function WaveformEditor({
   const handleMouseMove = useCallback(
     (e: ReactMouseEvent) => {
       const d = dragRef.current;
+
+      // Handle scrollbar drag
+      if (d.type === "scrollbar") {
+        const rect = scrollbarRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const dx = e.clientX - d.startX;
+        const timeDelta = (dx / rect.width) * duration;
+        const newOffset = Math.max(0, Math.min(duration - visibleDuration, d.startOffset + timeDelta));
+        setViewOffset(newOffset);
+        return;
+      }
+
       if (d.type === "none") {
-        // Update cursor style based on hit test
         const hit = hitTest(e);
         const el = containerRef.current;
         if (el) {
@@ -306,25 +382,22 @@ export default function WaveformEditor({
       if (d.type === "creating") {
         const start = Math.min(d.anchorTime, time);
         const end = Math.max(d.anchorTime, time);
-        if (end - start > 0.1) {
+        if (end - start > 0.05) {
           onRegionChange({ start, end });
         }
       } else if (d.type === "resizing-start") {
-        const newStart = Math.min(time, d.originalEnd - 0.1);
+        const newStart = Math.min(time, d.originalEnd - 0.05);
         onRegionChange({ start: Math.max(0, newStart), end: d.originalEnd });
       } else if (d.type === "resizing-end") {
-        const newEnd = Math.max(time, d.originalStart + 0.1);
-        onRegionChange({
-          start: d.originalStart,
-          end: Math.min(duration, newEnd),
-        });
+        const newEnd = Math.max(time, d.originalStart + 0.05);
+        onRegionChange({ start: d.originalStart, end: Math.min(duration, newEnd) });
       } else if (d.type === "moving") {
         let newStart = time - d.offset;
         newStart = Math.max(0, Math.min(newStart, duration - d.rangeWidth));
         onRegionChange({ start: newStart, end: newStart + d.rangeWidth });
       }
     },
-    [getTimeFromEvent, hitTest, onRegionChange, duration]
+    [getTimeFromEvent, hitTest, onRegionChange, duration, visibleDuration]
   );
 
   const handleMouseUp = useCallback(
@@ -333,8 +406,7 @@ export default function WaveformEditor({
       if (d.type === "creating") {
         const time = getTimeFromEvent(e);
         const dist = Math.abs(time - d.anchorTime);
-        if (dist < 0.1) {
-          // It was a click, not a drag — seek
+        if (dist < 0.05) {
           onSeek(time);
           onRegionChange(null);
         }
@@ -344,6 +416,29 @@ export default function WaveformEditor({
     [getTimeFromEvent, onSeek, onRegionChange]
   );
 
+  /* ── Scrollbar ─────────────────────────────────────────────────────── */
+
+  const handleScrollbarMouseDown = useCallback(
+    (e: ReactMouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = scrollbarRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      const x = e.clientX - rect.left;
+      const thumbWidth = (1 / zoom) * rect.width;
+      const thumbLeft = (viewOffset / duration) * rect.width;
+
+      if (x >= thumbLeft && x <= thumbLeft + thumbWidth) {
+        setDrag({ type: "scrollbar", startX: e.clientX, startOffset: viewOffset });
+      } else {
+        const newOffset = Math.max(0, Math.min(duration - visibleDuration, (x / rect.width) * duration - visibleDuration / 2));
+        setViewOffset(newOffset);
+      }
+    },
+    [zoom, viewOffset, duration, visibleDuration]
+  );
+
   /* ── Keyboard ──────────────────────────────────────────────────────── */
 
   const handleKeyDown = useCallback(
@@ -351,16 +446,32 @@ export default function WaveformEditor({
       if (e.key === " " || e.code === "Space") {
         e.preventDefault();
         onPlayPause();
+      } else if (e.key === "+" || e.key === "=") {
+        e.preventDefault();
+        setZoom((z) => Math.min(MAX_ZOOM, z * 1.5));
+      } else if (e.key === "-") {
+        e.preventDefault();
+        const newZoom = Math.max(MIN_ZOOM, zoom / 1.5);
+        setZoom(newZoom);
+        const newVis = duration / newZoom;
+        setViewOffset((o) => Math.max(0, Math.min(duration - newVis, o)));
+      } else if (e.key === "0") {
+        e.preventDefault();
+        setZoom(1);
+        setViewOffset(0);
       }
     },
-    [onPlayPause]
+    [onPlayPause, zoom, duration]
   );
 
   /* ── Render ────────────────────────────────────────────────────────── */
 
+  const thumbWidthPct = zoom > 1 ? `${(1 / zoom) * 100}%` : "100%";
+  const thumbLeftPct = zoom > 1 ? `${(viewOffset / duration) * 100}%` : "0%";
+
   return (
     <div className="card p-0 overflow-hidden">
-      {/* Play button + time */}
+      {/* Play button + time + zoom controls */}
       <div className="flex items-center gap-4 px-6 pt-5 pb-3">
         <button
           onClick={onPlayPause}
@@ -378,8 +489,43 @@ export default function WaveformEditor({
           )}
         </button>
         <span className="text-sm text-gray-400 font-mono tabular-nums">
-          {formatTime(currentTime)} / {formatTime(duration)}
+          {formatTime(currentTime)} / {formatTimeShort(duration)}
         </span>
+
+        {/* Zoom controls */}
+        <div className="flex items-center gap-1 ml-2">
+          <button
+            onClick={() => {
+              const newZoom = Math.max(MIN_ZOOM, zoom / 1.5);
+              setZoom(newZoom);
+              const newVis = duration / newZoom;
+              setViewOffset((o) => Math.max(0, Math.min(duration - newVis, o)));
+            }}
+            className="w-7 h-7 flex items-center justify-center rounded bg-stem-surface border border-stem-border text-gray-400 hover:text-white hover:border-stem-accent/50 transition-colors text-sm"
+            title="Zoom out (−)"
+          >
+            −
+          </button>
+          <span className="text-xs text-gray-500 w-10 text-center tabular-nums">
+            {zoom.toFixed(1)}x
+          </span>
+          <button
+            onClick={() => setZoom((z) => Math.min(MAX_ZOOM, z * 1.5))}
+            className="w-7 h-7 flex items-center justify-center rounded bg-stem-surface border border-stem-border text-gray-400 hover:text-white hover:border-stem-accent/50 transition-colors text-sm"
+            title="Zoom in (+)"
+          >
+            +
+          </button>
+          {zoom > 1 && (
+            <button
+              onClick={() => { setZoom(1); setViewOffset(0); }}
+              className="ml-1 text-xs text-gray-500 hover:text-white transition-colors"
+              title="Reset zoom (0)"
+            >
+              Reset
+            </button>
+          )}
+        </div>
 
         {/* Stem legend */}
         {stemPeaks && (
@@ -402,11 +548,12 @@ export default function WaveformEditor({
       {/* Waveform canvas + overlays */}
       <div
         ref={containerRef}
-        className="relative px-0 pb-4 select-none"
+        className="relative px-0 select-none"
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={() => setDrag({ type: "none" })}
+        onWheel={handleWheel}
         onKeyDown={handleKeyDown}
         tabIndex={0}
         style={{ outline: "none" }}
@@ -421,18 +568,35 @@ export default function WaveformEditor({
         <div
           ref={cursorRef}
           className="absolute top-0 w-0.5 bg-white/80 pointer-events-none"
-          style={{ height: WAVEFORM_HEIGHT, left: "0%" }}
+          style={{ height: WAVEFORM_HEIGHT, left: "0px" }}
         />
 
-        {/* Region hint text */}
-        {!region && duration > 0 && (
+        {/* Hint */}
+        {!region && duration > 0 && zoom <= 1 && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <span className="text-xs text-gray-600 bg-stem-bg/80 px-3 py-1 rounded">
-              Drag to select a time range
+              Drag to select · Ctrl+Scroll to zoom · Scroll to pan
             </span>
           </div>
         )}
       </div>
+
+      {/* Scrollbar (when zoomed) */}
+      {zoom > 1 && (
+        <div
+          ref={scrollbarRef}
+          className="relative mx-4 mb-3 mt-1 rounded-full bg-stem-bg/50 cursor-pointer"
+          style={{ height: SCROLLBAR_HEIGHT }}
+          onMouseDown={handleScrollbarMouseDown}
+        >
+          <div
+            className="absolute top-0 h-full rounded-full bg-stem-accent/40 hover:bg-stem-accent/60 transition-colors"
+            style={{ width: thumbWidthPct, left: thumbLeftPct }}
+          />
+        </div>
+      )}
+
+      {zoom <= 1 && <div className="pb-4" />}
     </div>
   );
 }

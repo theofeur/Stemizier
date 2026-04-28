@@ -1,6 +1,7 @@
 import logging
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from app.core.models import SeparationJob
 from app.core.stemmer import (
@@ -14,8 +15,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/tracks", tags=["stems"])
 
 
+class SeparationRequest(BaseModel):
+    quality: str = Field("high", pattern="^(fast|balanced|high)$")
+
+
 @router.post("/{track_id}/separate", response_model=SeparationJob)
-async def start_separation(track_id: str):
+async def start_separation(track_id: str, request: SeparationRequest = SeparationRequest()):
     """Start AI stem separation for an uploaded track."""
     track = get_track(track_id)
     if not track:
@@ -24,8 +29,8 @@ async def start_separation(track_id: str):
     if not track_path:
         raise HTTPException(404, "Track file not found")
 
-    job = create_separation_job(track_id, track_path)
-    logger.info(f"Started separation job {job.job_id} for track {track_id}")
+    job = create_separation_job(track_id, track_path, quality=request.quality)
+    logger.info(f"Started separation job {job.job_id} for track {track_id} (quality={request.quality})")
     return job
 
 

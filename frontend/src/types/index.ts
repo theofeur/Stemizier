@@ -31,6 +31,8 @@ export interface ProcessingJob {
   error: string | null;
 }
 
+export type QualityPreset = "fast" | "balanced" | "high";
+
 export interface SeparationJob {
   job_id: string;
   track_id: string;
@@ -39,6 +41,12 @@ export interface SeparationJob {
   stems: string[];
   error: string | null;
 }
+
+export const QUALITY_PRESETS: Record<QualityPreset, { label: string; description: string }> = {
+  fast: { label: "Fast", description: "~1-2 min · Good quality" },
+  balanced: { label: "Balanced", description: "~3-5 min · Great quality" },
+  high: { label: "High Quality", description: "~8-15 min · Best quality" },
+};
 
 export const STEM_COLORS: Record<StemType, string> = {
   vocals: "#f43f5e",

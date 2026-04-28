@@ -297,20 +297,39 @@ export class AudioEngine {
   private _computeGainAtTime(stemName: string, time: number): number {
     if (stemName === "instrumental") return 0;
 
-    for (const op of this._operations) {
-      if (time >= op.time_range.start && time < op.time_range.end) {
-        if (op.action === "remove") {
-          if (op.stem === stemName) return 0;
-          if (op.stem === "instrumental" && stemName !== "vocals") return 0;
-        } else if (op.action === "isolate") {
-          if (op.stem === "instrumental") {
-            if (stemName === "vocals") return 0;
-          } else if (op.stem !== stemName) {
-            return 0;
-          }
-        }
+    // Collect all operations active at this time
+    const activeOps = this._operations.filter(
+      (op) => time >= op.time_range.start && time < op.time_range.end
+    );
+
+    if (activeOps.length === 0) return 1;
+
+    // Check if this stem is explicitly removed
+    for (const op of activeOps) {
+      if (op.action === "remove") {
+        if (op.stem === stemName) return 0;
+        if (op.stem === "instrumental" && stemName !== "vocals") return 0;
       }
     }
+
+    // Collect all isolate operations at this time
+    const isolateOps = activeOps.filter((op) => op.action === "isolate");
+    if (isolateOps.length > 0) {
+      // Build the set of stems that should be heard
+      const isolatedStems = new Set<string>();
+      for (const op of isolateOps) {
+        if (op.stem === "instrumental") {
+          isolatedStems.add("drums");
+          isolatedStems.add("bass");
+          isolatedStems.add("other");
+        } else {
+          isolatedStems.add(op.stem);
+        }
+      }
+      // If this stem is in the isolated set, play it; otherwise mute
+      return isolatedStems.has(stemName) ? 1 : 0;
+    }
+
     return 1;
   }
 

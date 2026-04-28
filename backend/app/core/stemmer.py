@@ -107,19 +107,33 @@ def _resolve_output_path(out_file: str) -> Path:
 def separate_track(
     file_path: Path,
     progress_callback: Callable[[int], None] | None = None,
+    quality: str = "high",
 ) -> dict[str, np.ndarray]:
     """
     Separate a full audio track into stems using a multi-model pipeline.
 
     Pipeline:
     1. BS-RoFormer → vocals + instrumental
-    2. Demucs htdemucs_ft on instrumental → drums, bass, other
+    2. Demucs htdemucs_ft on original → drums, bass, other
+
+    Quality presets:
+    - "fast": shifts=1, overlap=0.25 (~1-2 min)
+    - "balanced": shifts=5, overlap=0.5 (~3-5 min)
+    - "high": shifts=10, overlap=0.75 (~8-15 min)
 
     Returns dict mapping stem name -> numpy array (samples, channels).
     progress_callback receives an integer 0-100 representing overall progress.
     """
-    logger.info(f"Starting stem separation for: {file_path.name}")
+    logger.info(f"Starting stem separation for: {file_path.name} (quality={quality})")
     results: dict[str, np.ndarray] = {}
+
+    # Quality presets for Demucs
+    QUALITY_PARAMS = {
+        "fast": {"shifts": 1, "overlap": 0.25, "num_passes": 2},
+        "balanced": {"shifts": 5, "overlap": 0.5, "num_passes": 10},
+        "high": {"shifts": 10, "overlap": 0.75, "num_passes": 20},
+    }
+    qp = QUALITY_PARAMS.get(quality, QUALITY_PARAMS["high"])
 
     # High water mark — never allow progress to go backwards
     _max_pct = [0]
@@ -137,7 +151,7 @@ def separate_track(
 
     # Track how many tqdm bars Demucs has spawned to spread progress evenly
     _demucs_bars = [-1]  # starts at -1 because first __init__ increments to 0
-    _demucs_num_passes = 20  # shifts=10 → 20 passes (shifts * 2)
+    _demucs_num_passes = qp["num_passes"]  # shifts * 2
 
     def _step2_tqdm_cb(current: int, total: int):
         # Step 2 maps to 55-90% of overall progress, split across multiple passes
@@ -186,16 +200,16 @@ def separate_track(
 
     # --- Step 2: Demucs on ORIGINAL file for drums/bass/other ---
     # Running on original (not instrumental) avoids cascading artifacts.
-    # Max quality: shifts=10, overlap=0.5 for best separation at cost of speed.
+    # Quality settings come from the selected preset.
     demucs_model = settings.stem_models["drums"]  # htdemucs_ft handles all 4 stems
     demucs_hq_params = {
         "segment_size": "Default",
-        "shifts": 10,
-        "overlap": 0.75,
+        "shifts": qp["shifts"],
+        "overlap": qp["overlap"],
         "segments_enabled": True,
     }
     separator2 = _get_separator(demucs_model, demucs_params=demucs_hq_params)
-    logger.info("Step 2/2: Separating drums/bass/other with Demucs (max quality: shifts=10, overlap=0.75)...")
+    logger.info(f"Step 2/2: Separating drums/bass/other with Demucs (shifts={qp['shifts']}, overlap={qp['overlap']})...")
     _report(55)
 
     def _on_new_demucs_bar():
@@ -237,36 +251,90 @@ def apply_operations(
     """
     Apply stem operations to the audio.
 
-    For each operation:
-    - 'remove': subtract the specified stem from the mix in the given time range
-    - 'isolate': keep only the specified stem in the given time range
+    For overlapping time ranges:
+    - Multiple 'isolate' operations are combined (sum of isolated stems)
+    - 'remove' operations subtract the stem from whatever remains
+
+    Operations are processed per-sample by building a timeline of boundaries.
     """
+    if not operations:
+        return original_audio.copy()
+
     result = original_audio.copy()
+    length = result.shape[0]
 
+    # Collect all unique time boundaries
+    boundaries: set[float] = set()
     for op in operations:
-        stem_name = op.stem.value
-        if stem_name not in stems:
-            logger.warning(f"Stem '{stem_name}' not found, skipping operation")
+        boundaries.add(op.time_range.start)
+        boundaries.add(op.time_range.end)
+
+    sorted_boundaries = sorted(boundaries)
+
+    # Process each segment between boundaries
+    for i in range(len(sorted_boundaries) - 1):
+        seg_start = sorted_boundaries[i]
+        seg_end = sorted_boundaries[i + 1]
+
+        # Find all operations active in this segment
+        active_ops = [
+            op for op in operations
+            if op.time_range.start <= seg_start and op.time_range.end >= seg_end
+        ]
+        if not active_ops:
             continue
 
-        start = op.time_range.start
-        end = op.time_range.end
+        # Separate into remove and isolate operations
+        remove_ops = [op for op in active_ops if op.action == "remove"]
+        isolate_ops = [op for op in active_ops if op.action == "isolate"]
 
-        stem_slice = slice_audio(stems[stem_name], sample_rate, start, end)
-        original_slice = slice_audio(result, sample_rate, start, end)
+        start_sample = int(seg_start * sample_rate)
+        end_sample = min(int(seg_end * sample_rate), length)
+        if start_sample >= end_sample:
+            continue
 
-        if op.action == "remove":
-            # Remove stem: subtract stem from the mix
-            new_slice = original_slice - stem_slice
-        elif op.action == "isolate":
-            # Isolate: keep only this stem
-            new_slice = stem_slice
+        if isolate_ops:
+            # Sum all isolated stems together
+            new_slice = np.zeros_like(result[start_sample:end_sample])
+            isolated_stems: set[str] = set()
+            for op in isolate_ops:
+                stem_name = op.stem.value
+                if stem_name == "instrumental":
+                    isolated_stems.update(["drums", "bass", "other"])
+                else:
+                    isolated_stems.add(stem_name)
+
+            for stem_name in isolated_stems:
+                if stem_name in stems:
+                    stem_data = stems[stem_name]
+                    s_end = min(end_sample, stem_data.shape[0])
+                    if start_sample < s_end:
+                        new_slice[:s_end - start_sample] += stem_data[start_sample:s_end]
+
+            # Apply any removes on top (subtract from isolated mix)
+            for op in remove_ops:
+                stem_name = op.stem.value
+                if stem_name in stems:
+                    stem_data = stems[stem_name]
+                    s_end = min(end_sample, stem_data.shape[0])
+                    if start_sample < s_end:
+                        new_slice[:s_end - start_sample] -= stem_data[start_sample:s_end]
+
+            new_slice = np.clip(new_slice, -1.0, 1.0)
+            result[start_sample:end_sample] = new_slice[:end_sample - start_sample]
         else:
-            continue
+            # Only removes: subtract each stem from the current mix
+            segment = result[start_sample:end_sample].copy()
+            for op in remove_ops:
+                stem_name = op.stem.value
+                if stem_name in stems:
+                    stem_data = stems[stem_name]
+                    s_end = min(end_sample, stem_data.shape[0])
+                    if start_sample < s_end:
+                        segment[:s_end - start_sample] -= stem_data[start_sample:s_end]
 
-        # Clip to prevent distortion
-        new_slice = np.clip(new_slice, -1.0, 1.0)
-        result = replace_segment(result, new_slice, sample_rate, start)
+            segment = np.clip(segment, -1.0, 1.0)
+            result[start_sample:end_sample] = segment
 
     return result
 
@@ -353,7 +421,7 @@ def get_separation_job(job_id: str) -> SeparationJob | None:
     return _separation_jobs.get(job_id)
 
 
-def create_separation_job(track_id: str, track_path: Path) -> SeparationJob:
+def create_separation_job(track_id: str, track_path: Path, quality: str = "high") -> SeparationJob:
     """Create and start an async stem separation job."""
     job_id = str(uuid.uuid4())
     job = SeparationJob(
@@ -362,11 +430,11 @@ def create_separation_job(track_id: str, track_path: Path) -> SeparationJob:
         status=ProcessingStatus.PENDING,
     )
     _separation_jobs[job_id] = job
-    _executor.submit(_run_separation, job_id, track_id, track_path)
+    _executor.submit(_run_separation, job_id, track_id, track_path, quality)
     return job
 
 
-def _run_separation(job_id: str, track_id: str, track_path: Path):
+def _run_separation(job_id: str, track_id: str, track_path: Path, quality: str = "high"):
     """Background job: separate stems and save each as a WAV file."""
     job = _separation_jobs[job_id]
     try:
@@ -380,7 +448,7 @@ def _run_separation(job_id: str, track_id: str, track_path: Path):
         with patch("audio_separator.separator.architectures.mdxc_separator.tqdm", _ProgressTqdm), \
              patch("audio_separator.separator.uvr_lib_v5.demucs.apply.tqdm.tqdm", _ProgressTqdm), \
              patch("tqdm.tqdm", _ProgressTqdm):
-            stems = separate_track(track_path, progress_callback=_update_progress)
+            stems = separate_track(track_path, progress_callback=_update_progress, quality=quality)
 
         # Get sample rate from original file
         info = sf.info(str(track_path))

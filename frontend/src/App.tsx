@@ -21,7 +21,9 @@ import type {
   StemOperation,
   ProcessingJob,
   SeparationJob,
+  QualityPreset,
 } from "./types";
+import { QUALITY_PRESETS } from "./types";
 
 const STEM_DISPLAY_ORDER: StemType[] = ["vocals", "drums", "bass", "other"];
 
@@ -41,6 +43,9 @@ export default function App() {
     "idle" | "uploading" | "analyzing" | "separating" | "loading-stems" | "done"
   >("idle");
   const [loadingProgress, setLoadingProgress] = useState(0);
+
+  // Quality preset
+  const [quality, setQuality] = useState<QualityPreset>("high");
 
   // Audio engine
   const engineRef = useRef<AudioEngine | null>(null);
@@ -126,7 +131,7 @@ export default function App() {
     try {
       setLoadingPhase("separating");
       setLoadingProgress(0);
-      const job = await startSeparation(trackId);
+      const job = await startSeparation(trackId, quality);
       setSepJob(job);
 
       // Poll for completion
@@ -151,7 +156,7 @@ export default function App() {
       console.error("Separation failed:", err);
       setLoadingPhase("idle");
     }
-  }, []);
+  }, [quality]);
 
   triggerSeparationRef.current = triggerSeparation;
 
@@ -319,10 +324,40 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-6 py-8 space-y-6">
         {/* Upload Section */}
         {!track && !isUploading && loadingPhase === "idle" && (
-          <FileUpload
-            onFileSelected={handleFileSelected}
-            isUploading={isUploading}
-          />
+          <div className="space-y-6">
+            <FileUpload
+              onFileSelected={handleFileSelected}
+              isUploading={isUploading}
+            />
+
+            {/* Quality Preset Selector */}
+            <div className="card">
+              <h3 className="text-sm font-medium text-gray-300 mb-3">Separation Quality</h3>
+              <div className="grid grid-cols-3 gap-3">
+                {(Object.keys(QUALITY_PRESETS) as QualityPreset[]).map((preset) => (
+                  <button
+                    key={preset}
+                    onClick={() => setQuality(preset)}
+                    className={`relative flex flex-col items-center gap-1 p-4 rounded-lg border transition-all ${
+                      quality === preset
+                        ? "border-stem-accent bg-stem-accent/10 ring-1 ring-stem-accent/30"
+                        : "border-stem-border bg-stem-surface hover:border-gray-500"
+                    }`}
+                  >
+                    <span className={`text-sm font-semibold ${quality === preset ? "text-stem-accent" : "text-gray-300"}`}>
+                      {QUALITY_PRESETS[preset].label}
+                    </span>
+                    <span className="text-xs text-gray-500">
+                      {QUALITY_PRESETS[preset].description}
+                    </span>
+                    {quality === preset && (
+                      <div className="absolute top-2 right-2 w-2 h-2 rounded-full bg-stem-accent" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Upload progress (before track is set) */}

@@ -27,8 +27,8 @@ export async function getTrackInfo(trackId: string): Promise<TrackInfo> {
   return data;
 }
 
-export async function startSeparation(trackId: string): Promise<SeparationJob> {
-  const { data } = await api.post<SeparationJob>(`/tracks/${trackId}/separate`);
+export async function startSeparation(trackId: string, quality: string = "high"): Promise<SeparationJob> {
+  const { data } = await api.post<SeparationJob>(`/tracks/${trackId}/separate`, { quality });
   return data;
 }
 
