@@ -28,6 +28,7 @@ export class AudioEngine {
   private _startOffset = 0;
   private _duration = 0;
   private _operations: StemOperation[] = [];
+  private _playGeneration = 0; // incremented on each play to ignore stale onended
 
   // Callbacks
   private _onTimeUpdate: ((time: number) => void) | null = null;
@@ -97,6 +98,7 @@ export class AudioEngine {
       this.ctx.resume();
     }
 
+    this._playGeneration++;
     const startFrom = offset ?? this._startOffset;
     this._startOffset = startFrom;
     this._startContextTime = this.ctx.currentTime;
@@ -173,15 +175,19 @@ export class AudioEngine {
   // ── Private ──────────────────────────────────────────────────────────
 
   private _playOriginal(offset: number): void {
+    const gen = this._playGeneration;
     const source = this.ctx.createBufferSource();
     source.buffer = this.originalBuffer!;
     source.connect(this.masterGain);
     source.start(0, offset);
-    source.onended = () => this._handleEnded();
+    source.onended = () => {
+      if (this._playGeneration === gen) this._handleEnded();
+    };
     this.originalSource = source;
   }
 
   private _playStems(offset: number): void {
+    const gen = this._playGeneration;
     for (const [name, { buffer, gain }] of this.stems) {
       const source = this.ctx.createBufferSource();
       source.buffer = buffer;
@@ -195,12 +201,15 @@ export class AudioEngine {
     // Detect track end from the longest stem
     const firstSource = this.stemSources.values().next().value;
     if (firstSource) {
-      firstSource.onended = () => this._handleEnded();
+      firstSource.onended = () => {
+        if (this._playGeneration === gen) this._handleEnded();
+      };
     }
   }
 
   private _stop(): void {
     if (this.originalSource) {
+      this.originalSource.onended = null;
       try {
         this.originalSource.stop();
       } catch {
@@ -209,6 +218,7 @@ export class AudioEngine {
       this.originalSource = null;
     }
     for (const source of this.stemSources.values()) {
+      source.onended = null;
       try {
         source.stop();
       } catch {

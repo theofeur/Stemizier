@@ -48,6 +48,10 @@ class _ProgressTqdm(_original_tqdm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Notify that a new bar was created (for multi-pass tracking)
+        on_new_bar = getattr(_progress_local, "on_new_bar", None)
+        if on_new_bar:
+            on_new_bar()
 
     def update(self, n=1):
         super().update(n)
@@ -56,25 +60,31 @@ class _ProgressTqdm(_original_tqdm):
             cb(self.n, self.total)
 
 
-def _get_separator(model_filename: str):
+def _get_separator(model_filename: str, demucs_params: dict | None = None):
     """Get or create a cached Separator instance for the given model."""
-    if model_filename in _separators:
-        return _separators[model_filename]
+    # Use a cache key that includes params so different quality settings get different instances
+    cache_key = f"{model_filename}:{hash(str(demucs_params))}" if demucs_params else model_filename
+    if cache_key in _separators:
+        return _separators[cache_key]
 
     from audio_separator.separator import Separator
 
     logger.info(f"Loading model: {model_filename}")
 
     output_dir = str(settings.output_dir.resolve())
-    separator = Separator(
+    kwargs = dict(
         model_file_dir=str(settings.model_dir.resolve()),
         output_dir=output_dir,
         output_format="WAV",
         sample_rate=settings.sample_rate,
         normalization_threshold=1.0,  # No normalization — preserve dynamics
     )
+    if demucs_params:
+        kwargs["demucs_params"] = demucs_params
+
+    separator = Separator(**kwargs)
     separator.load_model(model_filename=model_filename)
-    _separators[model_filename] = separator
+    _separators[cache_key] = separator
     logger.info(f"Model loaded: {model_filename}")
     return separator
 
@@ -111,18 +121,30 @@ def separate_track(
     logger.info(f"Starting stem separation for: {file_path.name}")
     results: dict[str, np.ndarray] = {}
 
+    # High water mark — never allow progress to go backwards
+    _max_pct = [0]
+
     def _report(pct: int):
         if progress_callback:
-            progress_callback(pct)
+            if pct > _max_pct[0]:
+                _max_pct[0] = pct
+            progress_callback(_max_pct[0])
 
     def _step1_tqdm_cb(current: int, total: int):
         # Step 1 maps to 10-50% of overall progress
         pct = 10 + int((current / total) * 40)
         _report(pct)
 
+    # Track how many tqdm bars Demucs has spawned to spread progress evenly
+    _demucs_bars = [-1]  # starts at -1 because first __init__ increments to 0
+    _demucs_num_passes = 20  # shifts=10 → 20 passes (shifts * 2)
+
     def _step2_tqdm_cb(current: int, total: int):
-        # Step 2 maps to 55-90% of overall progress
-        pct = 55 + int((current / total) * 35)
+        # Step 2 maps to 55-90% of overall progress, split across multiple passes
+        pass_idx = _demucs_bars[0]
+        per_pass = 35 / _demucs_num_passes
+        base = 55 + int(pass_idx * per_pass)
+        pct = base + int((current / total) * per_pass)
         _report(pct)
 
     # --- Step 1: BS-RoFormer for vocals/instrumental ---
@@ -162,17 +184,30 @@ def separate_track(
         results["instrumental"], _ = load_audio(file_path)
         instrumental_path = file_path
 
-    # --- Step 2: Demucs on instrumental for drums/bass/other ---
+    # --- Step 2: Demucs on ORIGINAL file for drums/bass/other ---
+    # Running on original (not instrumental) avoids cascading artifacts.
+    # Max quality: shifts=10, overlap=0.5 for best separation at cost of speed.
     demucs_model = settings.stem_models["drums"]  # htdemucs_ft handles all 4 stems
-    separator2 = _get_separator(demucs_model)
-    logger.info("Step 2/2: Separating drums/bass/other with Demucs...")
+    demucs_hq_params = {
+        "segment_size": "Default",
+        "shifts": 10,
+        "overlap": 0.75,
+        "segments_enabled": True,
+    }
+    separator2 = _get_separator(demucs_model, demucs_params=demucs_hq_params)
+    logger.info("Step 2/2: Separating drums/bass/other with Demucs (max quality: shifts=10, overlap=0.75)...")
     _report(55)
 
+    def _on_new_demucs_bar():
+        _demucs_bars[0] += 1
+
     _progress_local.callback = _step2_tqdm_cb
+    _progress_local.on_new_bar = _on_new_demucs_bar
     try:
-        output_files2 = separator2.separate(str(instrumental_path))
+        output_files2 = separator2.separate(str(file_path))
     finally:
         _progress_local.callback = None
+        _progress_local.on_new_bar = None
 
     _report(90)
     logger.info(f"Demucs output files: {output_files2}")
