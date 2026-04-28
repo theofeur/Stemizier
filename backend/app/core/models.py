@@ -61,3 +61,12 @@ class ProcessingJob(BaseModel):
     operations: list[StemOperation]
     output_file: str | None = None
     error: str | None = None
+
+
+class SeparationJob(BaseModel):
+    job_id: str
+    track_id: str
+    status: ProcessingStatus
+    progress: float = Field(0.0, ge=0, le=100)
+    stems: list[str] = Field(default_factory=list)
+    error: str | None = None

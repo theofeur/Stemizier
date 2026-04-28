@@ -27,6 +27,7 @@ from app.core.models import (
     StemOperation,
     ProcessingJob,
     ProcessingStatus,
+    SeparationJob,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,6 +184,8 @@ def apply_operations(
 
 # In-memory job store (replace with DB in production)
 _jobs: dict[str, ProcessingJob] = {}
+_separation_jobs: dict[str, SeparationJob] = {}
+_stem_files: dict[str, dict[str, Path]] = {}  # track_id -> {stem_name: file_path}
 _executor = ThreadPoolExecutor(max_workers=2)
 
 
@@ -245,5 +248,62 @@ def _run_job(
 
     except Exception as e:
         logger.exception(f"Job {job_id} failed")
+        job.status = ProcessingStatus.FAILED
+        job.error = str(e)
+
+
+# ---------------------------------------------------------------------------
+# Stem separation (saves individual stems for client-side preview)
+# ---------------------------------------------------------------------------
+
+def get_stem_files(track_id: str) -> dict[str, Path] | None:
+    return _stem_files.get(track_id)
+
+
+def get_separation_job(job_id: str) -> SeparationJob | None:
+    return _separation_jobs.get(job_id)
+
+
+def create_separation_job(track_id: str, track_path: Path) -> SeparationJob:
+    """Create and start an async stem separation job."""
+    job_id = str(uuid.uuid4())
+    job = SeparationJob(
+        job_id=job_id,
+        track_id=track_id,
+        status=ProcessingStatus.PENDING,
+    )
+    _separation_jobs[job_id] = job
+    _executor.submit(_run_separation, job_id, track_id, track_path)
+    return job
+
+
+def _run_separation(job_id: str, track_id: str, track_path: Path):
+    """Background job: separate stems and save each as a WAV file."""
+    job = _separation_jobs[job_id]
+    try:
+        job.status = ProcessingStatus.SEPARATING
+        job.progress = 10
+
+        stems = separate_track(track_path)
+
+        # Get sample rate from original file
+        info = sf.info(str(track_path))
+        sample_rate = info.samplerate
+
+        # Save each stem as a 16-bit WAV for client preview
+        stem_files: dict[str, Path] = {}
+        for stem_name, audio_data in stems.items():
+            stem_path = settings.output_dir / f"{track_id}_{stem_name}.wav"
+            sf.write(str(stem_path), audio_data, sample_rate, subtype="PCM_16")
+            stem_files[stem_name] = stem_path
+
+        _stem_files[track_id] = stem_files
+        job.stems = list(stem_files.keys())
+        job.status = ProcessingStatus.COMPLETE
+        job.progress = 100
+        logger.info(f"Separation job {job_id} complete. Stems: {job.stems}")
+
+    except Exception as e:
+        logger.exception(f"Separation job {job_id} failed")
         job.status = ProcessingStatus.FAILED
         job.error = str(e)

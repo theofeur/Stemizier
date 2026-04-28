@@ -31,6 +31,15 @@ export interface ProcessingJob {
   error: string | null;
 }
 
+export interface SeparationJob {
+  job_id: string;
+  track_id: string;
+  status: "pending" | "separating" | "complete" | "failed";
+  progress: number;
+  stems: string[];
+  error: string | null;
+}
+
 export const STEM_COLORS: Record<StemType, string> = {
   vocals: "#f43f5e",
   drums: "#f97316",

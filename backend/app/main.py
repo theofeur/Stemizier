@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.api.routes import health, upload, process
+from app.api.routes import health, upload, process, stems
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -42,3 +42,4 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api")
 app.include_router(upload.router, prefix="/api")
 app.include_router(process.router, prefix="/api")
+app.include_router(stems.router, prefix="/api")
