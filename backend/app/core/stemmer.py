@@ -227,6 +227,9 @@ def separate_track(
     _report(90)
     logger.info(f"Demucs output files: {output_files2}")
 
+    if not output_files2:
+        raise RuntimeError("Demucs separation failed — no output files produced. Check model integrity.")
+
     for out_file in output_files2:
         out_path = _resolve_output_path(out_file)
         data, sr = sf.read(str(out_path), dtype="float32", always_2d=True)
