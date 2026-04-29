@@ -25,7 +25,7 @@ import type {
 } from "./types";
 import { QUALITY_PRESETS } from "./types";
 
-const STEM_DISPLAY_ORDER: StemType[] = ["vocals", "drums", "bass", "other"];
+const STEM_DISPLAY_ORDER: StemType[] = ["vocals", "drums", "bass", "guitar", "piano", "other"];
 
 export default function App() {
   // Track state

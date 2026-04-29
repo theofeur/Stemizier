@@ -20,9 +20,11 @@ class Settings(BaseSettings):
     # BS-RoFormer models for each stem type (auto-downloaded by audio-separator)
     stem_models: dict[str, str] = {
         "vocals": "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
-        "drums": "htdemucs_ft.yaml",
-        "bass": "htdemucs_ft.yaml",
-        "other": "htdemucs_ft.yaml",
+        "drums": "htdemucs_6s.yaml",
+        "bass": "htdemucs_6s.yaml",
+        "guitar": "htdemucs_6s.yaml",
+        "piano": "htdemucs_6s.yaml",
+        "other": "htdemucs_6s.yaml",
     }
 
     # CORS

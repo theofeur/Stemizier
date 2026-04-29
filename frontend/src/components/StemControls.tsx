@@ -7,7 +7,7 @@ interface StemControlsProps {
   disabled: boolean;
 }
 
-const STEMS: StemType[] = ["vocals", "drums", "bass", "other", "instrumental"];
+const STEMS: StemType[] = ["vocals", "drums", "bass", "guitar", "piano", "other"];
 
 export default function StemControls({
   onStemAction,

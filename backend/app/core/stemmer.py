@@ -198,10 +198,11 @@ def separate_track(
         results["instrumental"], _ = load_audio(file_path)
         instrumental_path = file_path
 
-    # --- Step 2: Demucs on ORIGINAL file for drums/bass/other ---
+    # --- Step 2: Demucs 6-stem on ORIGINAL file for drums/bass/guitar/piano/other ---
     # Running on original (not instrumental) avoids cascading artifacts.
+    # htdemucs_6s outputs: vocals, drums, bass, guitar, piano, other
     # Quality settings come from the selected preset.
-    demucs_model = settings.stem_models["drums"]  # htdemucs_ft handles all 4 stems
+    demucs_model = settings.stem_models["drums"]  # htdemucs_6s handles all 6 stems
     demucs_hq_params = {
         "segment_size": "Default",
         "shifts": qp["shifts"],
@@ -209,7 +210,7 @@ def separate_track(
         "segments_enabled": True,
     }
     separator2 = _get_separator(demucs_model, demucs_params=demucs_hq_params)
-    logger.info(f"Step 2/2: Separating drums/bass/other with Demucs (shifts={qp['shifts']}, overlap={qp['overlap']})...")
+    logger.info(f"Step 2/2: Separating drums/bass/guitar/piano/other with Demucs 6s (shifts={qp['shifts']}, overlap={qp['overlap']})...")
     _report(55)
 
     def _on_new_demucs_bar():
@@ -234,9 +235,16 @@ def separate_track(
             results["drums"] = data
         elif "bass" in name:
             results["bass"] = data
+        elif "guitar" in name:
+            results["guitar"] = data
+        elif "piano" in name:
+            results["piano"] = data
         elif "other" in name:
             results["other"] = data
         # Skip vocals from demucs (we already have better ones from BS-RoFormer)
+
+    # Remove instrumental from results — it's not exposed as a user-facing stem
+    results.pop("instrumental", None)
 
     logger.info(f"Separation complete. Stems: {list(results.keys())}")
     return results
@@ -299,10 +307,7 @@ def apply_operations(
             isolated_stems: set[str] = set()
             for op in isolate_ops:
                 stem_name = op.stem.value
-                if stem_name == "instrumental":
-                    isolated_stems.update(["drums", "bass", "other"])
-                else:
-                    isolated_stems.add(stem_name)
+                isolated_stems.add(stem_name)
 
             for stem_name in isolated_stems:
                 if stem_name in stems:

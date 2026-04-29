@@ -4,7 +4,6 @@ import {
   useCallback,
   useState,
   type MouseEvent as ReactMouseEvent,
-  type WheelEvent as ReactWheelEvent,
 } from "react";
 import type { StemType, TimeRange, StemOperation } from "../types";
 import { STEM_COLORS, STEM_LABELS } from "../types";
@@ -20,7 +19,7 @@ const HANDLE_WIDTH = 8;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 50;
 
-const DRAW_ORDER: StemType[] = ["other", "bass", "drums", "vocals"];
+const DRAW_ORDER: StemType[] = ["other", "piano", "guitar", "bass", "drums", "vocals"];
 
 /* ── Props ─────────────────────────────────────────────────────────────── */
 
@@ -269,33 +268,56 @@ export default function WaveformEditor({
 
   /* ── Zoom (Ctrl+wheel) / Pan (wheel) ───────────────────────────────── */
 
-  const handleWheel = useCallback(
-    (e: ReactWheelEvent) => {
+  // Store latest values in refs so the native listener always sees current state
+  const zoomRef = useRef(zoom);
+  const viewOffsetRef = useRef(viewOffset);
+  const visibleDurationRef = useRef(visibleDuration);
+  const canvasWidthRef = useRef(canvasWidth);
+  const durationRef = useRef(duration);
+  zoomRef.current = zoom;
+  viewOffsetRef.current = viewOffset;
+  visibleDurationRef.current = visibleDuration;
+  canvasWidthRef.current = canvasWidth;
+  durationRef.current = duration;
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const handleWheel = (e: WheelEvent) => {
       e.preventDefault();
       const rect = canvasRef.current?.getBoundingClientRect();
       if (!rect) return;
 
       const mouseX = e.clientX - rect.left;
-      const mouseTime = xToTime(mouseX);
+      const cw = canvasWidthRef.current;
+      const dur = durationRef.current;
+      const z = zoomRef.current;
+      const vo = viewOffsetRef.current;
+      const vd = visibleDurationRef.current;
+      const vStart = vo;
+      const mouseTime = vStart + (mouseX / cw) * vd;
 
       if (e.ctrlKey || e.metaKey) {
         const zoomFactor = e.deltaY < 0 ? 1.3 : 1 / 1.3;
-        const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom * zoomFactor));
-        const newVisibleDuration = duration / newZoom;
-        const mouseRatio = mouseX / canvasWidth;
+        const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z * zoomFactor));
+        const newVisibleDuration = dur / newZoom;
+        const mouseRatio = mouseX / cw;
         const newOffset = mouseTime - mouseRatio * newVisibleDuration;
-        const clampedOffset = Math.max(0, Math.min(duration - newVisibleDuration, newOffset));
+        const clampedOffset = Math.max(0, Math.min(dur - newVisibleDuration, newOffset));
 
         setZoom(newZoom);
         setViewOffset(clampedOffset);
       } else {
-        const scrollAmount = (e.deltaY / canvasWidth) * visibleDuration * 3;
-        const newOffset = Math.max(0, Math.min(duration - visibleDuration, viewOffset + scrollAmount));
+        const scrollAmount = (e.deltaY / cw) * vd * 3;
+        const newOffset = Math.max(0, Math.min(dur - vd, vo + scrollAmount));
         setViewOffset(newOffset);
       }
-    },
-    [zoom, viewOffset, duration, visibleDuration, canvasWidth, xToTime]
-  );
+    };
+
+    el.addEventListener("wheel", handleWheel, { passive: false });
+    return () => el.removeEventListener("wheel", handleWheel);
+  }, []);
 
   /* ── Mouse interaction ─────────────────────────────────────────────── */
 
@@ -553,7 +575,6 @@ export default function WaveformEditor({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={() => setDrag({ type: "none" })}
-        onWheel={handleWheel}
         onKeyDown={handleKeyDown}
         tabIndex={0}
         style={{ outline: "none" }}

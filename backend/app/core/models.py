@@ -6,8 +6,9 @@ class StemType(str, Enum):
     VOCALS = "vocals"
     DRUMS = "drums"
     BASS = "bass"
+    GUITAR = "guitar"
+    PIANO = "piano"
     OTHER = "other"
-    INSTRUMENTAL = "instrumental"
 
 
 class ProcessingStatus(str, Enum):

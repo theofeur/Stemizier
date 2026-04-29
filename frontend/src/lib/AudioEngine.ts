@@ -295,8 +295,6 @@ export class AudioEngine {
   }
 
   private _computeGainAtTime(stemName: string, time: number): number {
-    if (stemName === "instrumental") return 0;
-
     // Collect all operations active at this time
     const activeOps = this._operations.filter(
       (op) => time >= op.time_range.start && time < op.time_range.end
@@ -306,10 +304,7 @@ export class AudioEngine {
 
     // Check if this stem is explicitly removed
     for (const op of activeOps) {
-      if (op.action === "remove") {
-        if (op.stem === stemName) return 0;
-        if (op.stem === "instrumental" && stemName !== "vocals") return 0;
-      }
+      if (op.action === "remove" && op.stem === stemName) return 0;
     }
 
     // Collect all isolate operations at this time
@@ -318,13 +313,7 @@ export class AudioEngine {
       // Build the set of stems that should be heard
       const isolatedStems = new Set<string>();
       for (const op of isolateOps) {
-        if (op.stem === "instrumental") {
-          isolatedStems.add("drums");
-          isolatedStems.add("bass");
-          isolatedStems.add("other");
-        } else {
-          isolatedStems.add(op.stem);
-        }
+        isolatedStems.add(op.stem);
       }
       // If this stem is in the isolated set, play it; otherwise mute
       return isolatedStems.has(stemName) ? 1 : 0;

@@ -1,4 +1,4 @@
-export type StemType = "vocals" | "drums" | "bass" | "other" | "instrumental";
+export type StemType = "vocals" | "drums" | "bass" | "guitar" | "piano" | "other";
 
 export interface TimeRange {
   start: number;
@@ -52,14 +52,16 @@ export const STEM_COLORS: Record<StemType, string> = {
   vocals: "#f43f5e",
   drums: "#f97316",
   bass: "#3b82f6",
+  guitar: "#10b981",
+  piano: "#eab308",
   other: "#a855f7",
-  instrumental: "#22c55e",
 };
 
 export const STEM_LABELS: Record<StemType, string> = {
   vocals: "Vocals",
   drums: "Drums",
   bass: "Bass",
+  guitar: "Guitar",
+  piano: "Piano / Keys",
   other: "Other / Synths / Pads",
-  instrumental: "Instrumental",
 };
