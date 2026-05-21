@@ -1,8 +1,22 @@
-export type StemType = "vocals" | "drums" | "bass" | "guitar" | "piano" | "other";
+export type StemType = "vocals" | "drums" | "bass" | "guitar" | "piano" | "other" | "instrumental";
+
+export type EditorMode = "stems" | "edit";
 
 export interface TimeRange {
   start: number;
   end: number;
+}
+
+/** A segment of the original audio used in the edit timeline */
+export interface AudioRegion {
+  sourceStart: number; // start time in the original audio (seconds)
+  sourceEnd: number;   // end time in the original audio (seconds)
+}
+
+/** Clipboard for edit mode — stores copied audio regions */
+export interface EditClipboard {
+  regions: AudioRegion[];
+  duration: number; // total duration of clipboard content
 }
 
 export interface StemOperation {
@@ -19,6 +33,7 @@ export interface TrackInfo {
   channels: number;
   format: string;
   file_size_bytes: number;
+  bpm: number;
 }
 
 export interface ProcessingJob {
@@ -32,6 +47,16 @@ export interface ProcessingJob {
 }
 
 export type QualityPreset = "fast" | "balanced" | "high";
+
+export type OutputFormat = "wav" | "flac" | "mp3" | "ogg" | "aac";
+
+export const OUTPUT_FORMATS: Record<OutputFormat, { label: string; description: string }> = {
+  wav: { label: "WAV", description: "Lossless · Uncompressed · Full quality" },
+  flac: { label: "FLAC", description: "Lossless · Compressed · ~50% smaller than WAV" },
+  mp3: { label: "MP3", description: "320kbps · Cuts above ~20kHz · Universal compatibility" },
+  ogg: { label: "OGG Vorbis", description: "Max quality · Full bandwidth · Smaller than WAV" },
+  aac: { label: "AAC (M4A)", description: "256kbps · Full bandwidth · Apple/streaming" },
+};
 
 export interface SeparationJob {
   job_id: string;
@@ -55,6 +80,7 @@ export const STEM_COLORS: Record<StemType, string> = {
   guitar: "#10b981",
   piano: "#eab308",
   other: "#a855f7",
+  instrumental: "#22c55e",
 };
 
 export const STEM_LABELS: Record<StemType, string> = {
@@ -64,4 +90,5 @@ export const STEM_LABELS: Record<StemType, string> = {
   guitar: "Guitar",
   piano: "Piano / Keys",
   other: "Other / Synths / Pads",
+  instrumental: "Instrumental",
 };

@@ -45,7 +45,7 @@ export default function OperationsList({ operations, onRemove }: OperationsListP
                 </span>
               </span>
               <span className="text-xs text-gray-500 font-mono">
-                {formatTime(op.time_range.start)} — {formatTime(op.time_range.end)}
+                {`${formatTime(op.time_range.start)} — ${formatTime(op.time_range.end)}`}
               </span>
             </div>
             <button

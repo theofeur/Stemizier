@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { TrackInfo, ProcessingJob, StemOperation, SeparationJob } from "../types";
+import type { TrackInfo, ProcessingJob, StemOperation, SeparationJob, OutputFormat, TimeRange, AudioRegion } from "../types";
 
 const api = axios.create({
   baseURL: "/api",
@@ -44,12 +44,16 @@ export function getStemAudioUrl(trackId: string, stemName: string): string {
 export async function startProcessing(
   trackId: string,
   operations: StemOperation[],
-  outputFormat: "wav" | "mp3" = "wav"
+  outputFormat: OutputFormat = "wav",
+  exportRange?: TimeRange,
+  editTimeline?: AudioRegion[] | null
 ): Promise<ProcessingJob> {
   const { data } = await api.post<ProcessingJob>("/process", {
     track_id: trackId,
     operations,
     output_format: outputFormat,
+    export_range: exportRange ?? null,
+    edit_timeline: editTimeline ?? null,
   });
   return data;
 }

@@ -39,11 +39,22 @@ async def start_processing(request: ProcessRequest):
         if op.time_range.start >= op.time_range.end:
             raise HTTPException(400, "Time range start must be before end")
 
+    # Validate edit_timeline if provided
+    if request.edit_timeline:
+        for region in request.edit_timeline:
+            if region.sourceEnd > track.duration:
+                raise HTTPException(
+                    400,
+                    f"Edit timeline region sourceEnd ({region.sourceEnd}s) exceeds track duration ({track.duration}s)",
+                )
+
     job = create_processing_job(
         track_id=request.track_id,
         track_path=track_path,
         operations=request.operations,
         output_format=request.output_format,
+        export_range=(request.export_range.start, request.export_range.end) if request.export_range else None,
+        edit_timeline=request.edit_timeline,
     )
     logger.info(f"Created job {job.job_id} for track {request.track_id}")
     return job
@@ -73,7 +84,14 @@ async def download_result(job_id: str):
     if not output_path.exists():
         raise HTTPException(500, "Output file not found on disk")
 
-    media_type = "audio/wav" if output_path.suffix == ".wav" else "audio/mpeg"
+    mime_types = {
+        ".wav": "audio/wav",
+        ".flac": "audio/flac",
+        ".mp3": "audio/mpeg",
+        ".ogg": "audio/ogg",
+        ".m4a": "audio/mp4",
+    }
+    media_type = mime_types.get(output_path.suffix, "application/octet-stream")
     return FileResponse(
         path=str(output_path),
         media_type=media_type,

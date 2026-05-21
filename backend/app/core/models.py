@@ -9,6 +9,7 @@ class StemType(str, Enum):
     GUITAR = "guitar"
     PIANO = "piano"
     OTHER = "other"
+    INSTRUMENTAL = "instrumental"
 
 
 class ProcessingStatus(str, Enum):
@@ -22,6 +23,12 @@ class ProcessingStatus(str, Enum):
 class TimeRange(BaseModel):
     start: float = Field(..., ge=0, description="Start time in seconds")
     end: float = Field(..., gt=0, description="End time in seconds")
+
+
+class AudioRegion(BaseModel):
+    """A region referencing a slice of the original audio."""
+    sourceStart: float = Field(..., ge=0)
+    sourceEnd: float = Field(..., gt=0)
 
 
 class StemOperation(BaseModel):
@@ -41,7 +48,13 @@ class ProcessRequest(BaseModel):
     operations: list[StemOperation] = Field(
         ..., min_length=1, description="List of stem operations to apply"
     )
-    output_format: str = Field("wav", pattern="^(wav|mp3)$")
+    output_format: str = Field("wav", pattern="^(wav|mp3|flac|ogg|aac)$")
+    export_range: TimeRange | None = Field(
+        None, description="Optional time range to trim the output to. If None, exports the full track."
+    )
+    edit_timeline: list[AudioRegion] | None = Field(
+        None, description="Optional edit timeline: ordered regions from the original audio that compose the final output."
+    )
 
 
 class TrackInfo(BaseModel):
@@ -52,6 +65,7 @@ class TrackInfo(BaseModel):
     channels: int
     format: str
     file_size_bytes: int
+    bpm: float = 0.0
 
 
 class ProcessingJob(BaseModel):

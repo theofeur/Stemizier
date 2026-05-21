@@ -2,8 +2,10 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import FileUpload from "./components/FileUpload";
 import WaveformEditor from "./components/WaveformEditor";
 import StemControls from "./components/StemControls";
+import EditControls from "./components/EditControls";
 import OperationsList from "./components/OperationsList";
 import ProcessingStatus from "./components/ProcessingStatus";
+import BpmControls from "./components/BpmControls";
 import { AudioEngine } from "./lib/AudioEngine";
 import {
   uploadTrack,
@@ -22,8 +24,12 @@ import type {
   ProcessingJob,
   SeparationJob,
   QualityPreset,
+  OutputFormat,
+  EditorMode,
+  AudioRegion,
+  EditClipboard,
 } from "./types";
-import { QUALITY_PRESETS } from "./types";
+import { QUALITY_PRESETS, OUTPUT_FORMATS } from "./types";
 
 const STEM_DISPLAY_ORDER: StemType[] = ["vocals", "drums", "bass", "guitar", "piano", "other"];
 
@@ -47,6 +53,16 @@ export default function App() {
   // Quality preset
   const [quality, setQuality] = useState<QualityPreset>("high");
 
+  // Output format
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>("wav");
+
+  // Export range option
+  const [exportSelectionOnly, setExportSelectionOnly] = useState(false);
+
+  // BPM state
+  const [bpm, setBpm] = useState(0);
+  const [masterTempo, setMasterTempo] = useState(false);
+
   // Audio engine
   const engineRef = useRef<AudioEngine | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -61,6 +77,12 @@ export default function App() {
   const [region, setRegion] = useState<TimeRange | null>(null);
   const [operations, setOperations] = useState<StemOperation[]>([]);
 
+  // Edit timeline (for edit mode — Audacity-like)
+  const [editTimeline, setEditTimeline] = useState<AudioRegion[] | null>(null);
+  const [editClipboard, setEditClipboard] = useState<EditClipboard | null>(null);
+
+  // Editor mode
+  const [editorMode, setEditorMode] = useState<EditorMode>("stems");
   // Export job
   const [exportJob, setExportJob] = useState<ProcessingJob | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -87,6 +109,7 @@ export default function App() {
       });
       setTrack(trackInfo);
       setDuration(trackInfo.duration);
+      setBpm(trackInfo.bpm || 0);
 
       setLoadingPhase("analyzing");
       setLoadingProgress(0);
@@ -210,6 +233,20 @@ export default function App() {
     engineRef.current?.seek(time);
   }, []);
 
+  /* ── BPM ──────────────────────────────────────────────────────────── */
+
+  const handleBpmChange = useCallback((newBpm: number) => {
+    setBpm(newBpm);
+    if (track && track.bpm > 0) {
+      engineRef.current?.setTempoRatio(newBpm / track.bpm);
+    }
+  }, [track]);
+
+  const handleMasterTempoChange = useCallback((enabled: boolean) => {
+    setMasterTempo(enabled);
+    engineRef.current?.setMasterTempo(enabled);
+  }, []);
+
   /* ── Operations ──────────────────────────────────────────────────── */
 
   const handleStemAction = useCallback(
@@ -229,6 +266,203 @@ export default function App() {
     [region]
   );
 
+  /* ── Edit Timeline (Audacity-like) ──────────────────────────────── */
+
+  /** Get the current timeline (or create default from original duration) */
+  const getTimeline = useCallback((): AudioRegion[] => {
+    if (editTimeline) return editTimeline;
+    return [{ sourceStart: 0, sourceEnd: duration }];
+  }, [editTimeline, duration]);
+
+  /** Extract sub-regions from the timeline at the given edited-time range */
+  const extractRegions = useCallback((start: number, end: number): AudioRegion[] => {
+    const timeline = getTimeline();
+    const result: AudioRegion[] = [];
+    let elapsed = 0;
+    for (const region of timeline) {
+      const regionDur = region.sourceEnd - region.sourceStart;
+      const regionEnd = elapsed + regionDur;
+
+      if (regionEnd <= start) { elapsed = regionEnd; continue; }
+      if (elapsed >= end) break;
+
+      const clipStart = Math.max(0, start - elapsed);
+      const clipEnd = Math.min(regionDur, end - elapsed);
+      result.push({
+        sourceStart: region.sourceStart + clipStart,
+        sourceEnd: region.sourceStart + clipEnd,
+      });
+      elapsed = regionEnd;
+    }
+    return result;
+  }, [getTimeline]);
+
+  /** Remove a range from the timeline (returns new timeline) */
+  const removeFromTimeline = useCallback((start: number, end: number): AudioRegion[] => {
+    const timeline = getTimeline();
+    const result: AudioRegion[] = [];
+    let elapsed = 0;
+    for (const region of timeline) {
+      const regionDur = region.sourceEnd - region.sourceStart;
+      const regionEnd = elapsed + regionDur;
+
+      if (regionEnd <= start || elapsed >= end) {
+        // Entirely outside the cut range — keep as-is
+        result.push(region);
+      } else {
+        // Partially or fully inside the cut range
+        if (elapsed < start) {
+          // Keep the part before the cut
+          result.push({ sourceStart: region.sourceStart, sourceEnd: region.sourceStart + (start - elapsed) });
+        }
+        if (regionEnd > end) {
+          // Keep the part after the cut
+          result.push({ sourceStart: region.sourceStart + (end - elapsed), sourceEnd: region.sourceEnd });
+        }
+      }
+      elapsed = regionEnd;
+    }
+    return result;
+  }, [getTimeline]);
+
+  /** Insert regions at a position in the timeline */
+  const insertIntoTimeline = useCallback((position: number, regions: AudioRegion[]): AudioRegion[] => {
+    const timeline = getTimeline();
+    const result: AudioRegion[] = [];
+    let elapsed = 0;
+    let inserted = false;
+
+    for (const region of timeline) {
+      const regionDur = region.sourceEnd - region.sourceStart;
+
+      if (!inserted && elapsed + regionDur >= position) {
+        // Split this region and insert
+        const splitPoint = position - elapsed;
+        if (splitPoint > 0.001) {
+          result.push({ sourceStart: region.sourceStart, sourceEnd: region.sourceStart + splitPoint });
+        }
+        result.push(...regions);
+        if (splitPoint < regionDur - 0.001) {
+          result.push({ sourceStart: region.sourceStart + splitPoint, sourceEnd: region.sourceEnd });
+        }
+        inserted = true;
+      } else {
+        result.push(region);
+      }
+      elapsed += regionDur;
+    }
+
+    if (!inserted) {
+      // Position is at or past the end
+      result.push(...regions);
+    }
+    return result;
+  }, [getTimeline]);
+
+  const applyTimeline = useCallback((newTimeline: AudioRegion[]) => {
+    setEditTimeline(newTimeline);
+    const engine = engineRef.current;
+    engine?.setEditTimeline(newTimeline);
+    // Update duration
+    const newDur = newTimeline.reduce((sum, r) => sum + (r.sourceEnd - r.sourceStart), 0);
+    setDuration(newDur);
+    // Recompute peaks to reflect edited waveform
+    if (engine) {
+      const editedOriginal = engine.getEditedPeaks(engine.getOriginalPeaks(800), 800);
+      setOriginalPeaks(editedOriginal);
+      // Also update stem peaks if available
+      const stemNames = engine.stemNames;
+      if (stemNames.length > 0) {
+        const newStemPeaks: Record<string, Float32Array> = {};
+        for (const name of STEM_DISPLAY_ORDER) {
+          if (stemNames.includes(name)) {
+            newStemPeaks[name] = engine.getEditedStemPeaks(name, 800);
+          }
+        }
+        setStemPeaks(newStemPeaks);
+      }
+    }
+    // Clear region selection (it may no longer be valid)
+    setRegion(null);
+  }, []);
+
+  const handleEditCopy = useCallback(() => {
+    if (!region) return;
+    const regions = extractRegions(region.start, region.end);
+    const clipDuration = regions.reduce((sum, r) => sum + (r.sourceEnd - r.sourceStart), 0);
+    setEditClipboard({ regions, duration: clipDuration });
+  }, [region, extractRegions]);
+
+  const handleEditCut = useCallback(() => {
+    if (!region) return;
+    // Copy first
+    const regions = extractRegions(region.start, region.end);
+    const clipDuration = regions.reduce((sum, r) => sum + (r.sourceEnd - r.sourceStart), 0);
+    setEditClipboard({ regions, duration: clipDuration });
+    // Remove from timeline
+    const newTimeline = removeFromTimeline(region.start, region.end);
+    applyTimeline(newTimeline);
+  }, [region, extractRegions, removeFromTimeline, applyTimeline]);
+
+  const handleEditPaste = useCallback(() => {
+    if (!editClipboard) return;
+    const newTimeline = insertIntoTimeline(currentTime, editClipboard.regions);
+    applyTimeline(newTimeline);
+  }, [editClipboard, currentTime, insertIntoTimeline, applyTimeline]);
+
+  const handleEditDelete = useCallback(() => {
+    if (!region) return;
+    const newTimeline = removeFromTimeline(region.start, region.end);
+    applyTimeline(newTimeline);
+  }, [region, removeFromTimeline, applyTimeline]);
+
+  const handleUndoEdits = useCallback(() => {
+    setEditTimeline(null);
+    engineRef.current?.setEditTimeline(null);
+    setDuration(engineRef.current?.originalDuration ?? 0);
+    setRegion(null);
+    setEditClipboard(null);
+    // Restore original peaks
+    const engine = engineRef.current;
+    if (engine) {
+      setOriginalPeaks(engine.getOriginalPeaks(800));
+      const names = engine.stemNames;
+      if (names.length > 0) {
+        const peaks: Record<string, Float32Array> = {};
+        for (const name of STEM_DISPLAY_ORDER) {
+          if (names.includes(name)) {
+            peaks[name] = engine.getStemPeaks(name, 800);
+          }
+        }
+        setStemPeaks(peaks);
+      }
+    }
+  }, []);
+
+  // Global keyboard shortcuts for edit mode
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (editorMode !== "edit") return;
+      // Don't intercept if user is typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if ((e.ctrlKey || e.metaKey) && e.key === "c") {
+        e.preventDefault();
+        handleEditCopy();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "x") {
+        e.preventDefault();
+        handleEditCut();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "v") {
+        e.preventDefault();
+        handleEditPaste();
+      } else if (e.key === "Delete") {
+        e.preventDefault();
+        handleEditDelete();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [editorMode, handleEditCopy, handleEditCut, handleEditPaste, handleEditDelete]);
+
   const handleRemoveOperation = useCallback((index: number) => {
     setOperations((prev) => {
       const updated = prev.filter((_, i) => i !== index);
@@ -244,7 +478,8 @@ export default function App() {
     setIsProcessing(true);
 
     try {
-      const newJob = await startProcessing(track.track_id, operations, "wav");
+      const exportRange = exportSelectionOnly && region ? region : undefined;
+      const newJob = await startProcessing(track.track_id, operations, outputFormat, exportRange);
       setExportJob(newJob);
 
       pollRef.current = setInterval(async () => {
@@ -264,7 +499,7 @@ export default function App() {
       console.error("Export failed:", err);
       setIsProcessing(false);
     }
-  }, [track, operations]);
+  }, [track, operations, outputFormat, exportSelectionOnly, region]);
 
   const handleDownload = useCallback(() => {
     if (exportJob?.job_id) {
@@ -288,8 +523,13 @@ export default function App() {
     setIsPlaying(false);
     setCurrentTime(0);
     setDuration(0);
+    setBpm(0);
+    setMasterTempo(false);
     setLoadingPhase("idle");
     setLoadingProgress(0);
+    setEditClipboard(null);
+    setEditTimeline(null);
+    setEditorMode("stems");
   }, []);
 
   // Cleanup polling on unmount
@@ -315,7 +555,7 @@ export default function App() {
           </svg>
           <h1 className="text-xl font-bold tracking-tight">Stemizer</h1>
           <span className="text-xs text-gray-500 bg-stem-surface border border-stem-border px-2 py-0.5 rounded-full ml-1">
-            v0.2
+            v1.0
           </span>
         </div>
       </header>
@@ -404,6 +644,17 @@ export default function App() {
               </button>
             </div>
 
+            {/* BPM Controls */}
+            {track.bpm > 0 && (
+              <BpmControls
+                originalBpm={track.bpm}
+                bpm={bpm}
+                onBpmChange={handleBpmChange}
+                masterTempo={masterTempo}
+                onMasterTempoChange={handleMasterTempoChange}
+              />
+            )}
+
             {/* Waveform Editor */}
             <WaveformEditor
               originalPeaks={originalPeaks}
@@ -416,6 +667,13 @@ export default function App() {
               onSeek={handleSeek}
               onPlayPause={handlePlayPause}
               operations={operations}
+              stemsReady={stemsReady}
+              editorMode={editorMode}
+              editTimeline={editTimeline}
+              editClipboard={editClipboard}
+              onEditCopy={handleEditCopy}
+              onEditCut={handleEditCut}
+              onEditPaste={handleEditPaste}
             />
 
             {/* Loading Progress Bar */}
@@ -465,11 +723,62 @@ export default function App() {
             {/* Stem controls (only after separation) */}
             {stemsReady && (
               <>
-                <StemControls
-                  onStemAction={handleStemAction}
-                  region={region}
-                  disabled={!stemsReady}
-                />
+                {/* Mode Toggle */}
+                <div className="flex items-center gap-1 p-1 bg-stem-surface border border-stem-border rounded-lg w-fit">
+                  <button
+                    onClick={() => setEditorMode("stems")}
+                    className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                      editorMode === "stems"
+                        ? "bg-stem-accent text-white shadow-sm"
+                        : "text-gray-400 hover:text-white"
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                        <path d="M4 20V10M8 20V6M12 20V2M16 20V6M20 20V10" />
+                      </svg>
+                      Stems
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setEditorMode("edit")}
+                    className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                      editorMode === "edit"
+                        ? "bg-stem-accent text-white shadow-sm"
+                        : "text-gray-400 hover:text-white"
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                      </svg>
+                      Edit
+                    </span>
+                  </button>
+                </div>
+
+                {/* Mode-specific controls */}
+                {editorMode === "stems" ? (
+                  <StemControls
+                    onStemAction={handleStemAction}
+                    region={region}
+                    disabled={!stemsReady}
+                  />
+                ) : (
+                  <EditControls
+                    region={region}
+                    clipboard={editClipboard}
+                    currentTime={currentTime}
+                    editedDuration={duration}
+                    hasEdits={editTimeline !== null}
+                    onCopy={handleEditCopy}
+                    onCut={handleEditCut}
+                    onPaste={handleEditPaste}
+                    onDelete={handleEditDelete}
+                    onUndoEdits={handleUndoEdits}
+                  />
+                )}
 
                 {/* Operations Queue */}
                 <OperationsList
@@ -477,17 +786,73 @@ export default function App() {
                   onRemove={handleRemoveOperation}
                 />
 
-                {/* Export Button */}
+                {/* Export Format Selector & Button */}
                 {operations.length > 0 && !exportJob && (
-                  <button
-                    onClick={handleExport}
-                    disabled={isProcessing}
-                    className="btn-primary w-full py-4 text-lg font-semibold disabled:opacity-50"
-                  >
-                    {isProcessing
-                      ? "Starting..."
-                      : `Export Track (${operations.length} operation${operations.length > 1 ? "s" : ""})`}
-                  </button>
+                  <div className="card space-y-4">
+                    <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">
+                      Export Format
+                    </h3>
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                      {(Object.keys(OUTPUT_FORMATS) as OutputFormat[]).map((fmt) => (
+                        <button
+                          key={fmt}
+                          onClick={() => setOutputFormat(fmt)}
+                          className={`relative flex flex-col items-center gap-0.5 p-3 rounded-lg border transition-all ${
+                            outputFormat === fmt
+                              ? "border-stem-accent bg-stem-accent/10 ring-1 ring-stem-accent/30"
+                              : "border-stem-border bg-stem-surface hover:border-gray-500"
+                          }`}
+                        >
+                          <span className={`text-sm font-semibold ${outputFormat === fmt ? "text-stem-accent" : "text-gray-300"}`}>
+                            {OUTPUT_FORMATS[fmt].label}
+                          </span>
+                          <span className="text-[10px] text-gray-500 text-center leading-tight">
+                            {OUTPUT_FORMATS[fmt].description}
+                          </span>
+                          {outputFormat === fmt && (
+                            <div className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-stem-accent" />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Export Range Toggle */}
+                    <div className="flex items-center justify-between p-3 rounded-lg border border-stem-border bg-stem-surface">
+                      <div className="flex flex-col">
+                        <span className="text-sm font-medium text-gray-300">Export selection only</span>
+                        <span className="text-xs text-gray-500">
+                          {region
+                            ? `Selected: ${region.start.toFixed(1)}s – ${region.end.toFixed(1)}s`
+                            : "Select a region on the waveform first"}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => setExportSelectionOnly((v) => !v)}
+                        disabled={!region}
+                        className={`relative w-11 h-6 rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                          exportSelectionOnly && region
+                            ? "bg-stem-accent"
+                            : "bg-gray-600"
+                        }`}
+                      >
+                        <span
+                          className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                            exportSelectionOnly && region ? "translate-x-5" : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </div>
+
+                    <button
+                      onClick={handleExport}
+                      disabled={isProcessing}
+                      className="btn-primary w-full py-4 text-lg font-semibold disabled:opacity-50"
+                    >
+                      {isProcessing
+                        ? "Starting..."
+                        : `Export${exportSelectionOnly && region ? ` selection` : ""} as ${OUTPUT_FORMATS[outputFormat].label} (${operations.length} operation${operations.length > 1 ? "s" : ""})`}
+                    </button>
+                  </div>
                 )}
 
                 {/* Export Status */}

@@ -247,10 +247,27 @@ def separate_track(
         # Skip vocals from demucs (we already have better ones from BS-RoFormer)
 
     # Remove instrumental from results — it's not exposed as a user-facing stem
-    results.pop("instrumental", None)
+    # results.pop("instrumental", None)  # Keep instrumental for quality
 
     logger.info(f"Separation complete. Stems: {list(results.keys())}")
     return results
+
+
+
+def assemble_timeline(audio: np.ndarray, timeline: list, sample_rate: int) -> np.ndarray:
+    """Assemble audio from an edit timeline (list of AudioRegion dicts)."""
+    if not timeline:
+        return audio.copy()
+    segments = []
+    for region in timeline:
+        start_sample = int(region.sourceStart * sample_rate)
+        end_sample = int(region.sourceEnd * sample_rate)
+        end_sample = min(end_sample, audio.shape[0])
+        if start_sample < end_sample:
+            segments.append(audio[start_sample:end_sample])
+    if not segments:
+        return audio.copy()
+    return np.concatenate(segments, axis=0)
 
 
 def apply_operations(
@@ -258,20 +275,28 @@ def apply_operations(
     stems: dict[str, np.ndarray],
     sample_rate: int,
     operations: list[StemOperation],
+    edit_timeline=None,
 ) -> np.ndarray:
     """
     Apply stem operations to the audio.
 
-    For overlapping time ranges:
-    - Multiple 'isolate' operations are combined (sum of isolated stems)
-    - 'remove' operations subtract the stem from whatever remains
-
-    Operations are processed per-sample by building a timeline of boundaries.
+    If edit_timeline is provided, first assembles the audio and stems from
+    the timeline regions, then applies stem operations on the assembled result.
     """
-    if not operations:
-        return original_audio.copy()
+    # Assemble from timeline if provided
+    if edit_timeline:
+        result = assemble_timeline(original_audio, edit_timeline, sample_rate)
+        assembled_stems = {
+            name: assemble_timeline(data, edit_timeline, sample_rate)
+            for name, data in stems.items()
+        }
+    else:
+        result = original_audio.copy()
+        assembled_stems = stems
 
-    result = original_audio.copy()
+    if not operations:
+        return result
+
     length = result.shape[0]
 
     # Collect all unique time boundaries
@@ -310,20 +335,23 @@ def apply_operations(
             isolated_stems: set[str] = set()
             for op in isolate_ops:
                 stem_name = op.stem.value
-                isolated_stems.add(stem_name)
+                if stem_name == "instrumental":
+                    isolated_stems.update(["drums", "bass", "guitar", "piano", "other"])
+                else:
+                    isolated_stems.add(stem_name)
 
             for stem_name in isolated_stems:
-                if stem_name in stems:
-                    stem_data = stems[stem_name]
+                if stem_name in assembled_stems:
+                    stem_data = assembled_stems[stem_name]
                     s_end = min(end_sample, stem_data.shape[0])
                     if start_sample < s_end:
                         new_slice[:s_end - start_sample] += stem_data[start_sample:s_end]
 
-            # Apply any removes on top (subtract from isolated mix)
+            # Apply any removes on top
             for op in remove_ops:
                 stem_name = op.stem.value
-                if stem_name in stems:
-                    stem_data = stems[stem_name]
+                if stem_name in assembled_stems:
+                    stem_data = assembled_stems[stem_name]
                     s_end = min(end_sample, stem_data.shape[0])
                     if start_sample < s_end:
                         new_slice[:s_end - start_sample] -= stem_data[start_sample:s_end]
@@ -335,8 +363,8 @@ def apply_operations(
             segment = result[start_sample:end_sample].copy()
             for op in remove_ops:
                 stem_name = op.stem.value
-                if stem_name in stems:
-                    stem_data = stems[stem_name]
+                if stem_name in assembled_stems:
+                    stem_data = assembled_stems[stem_name]
                     s_end = min(end_sample, stem_data.shape[0])
                     if start_sample < s_end:
                         segment[:s_end - start_sample] -= stem_data[start_sample:s_end]
@@ -363,6 +391,8 @@ def create_processing_job(
     track_path: Path,
     operations: list[StemOperation],
     output_format: str = "wav",
+    export_range: tuple[float, float] | None = None,
+    edit_timeline=None,
 ) -> ProcessingJob:
     """Create and start an async processing job."""
     job_id = str(uuid.uuid4())
@@ -374,7 +404,7 @@ def create_processing_job(
     )
     _jobs[job_id] = job
 
-    _executor.submit(_run_job, job_id, track_path, operations, output_format)
+    _executor.submit(_run_job, job_id, track_path, operations, output_format, export_range, edit_timeline)
     return job
 
 
@@ -383,6 +413,8 @@ def _run_job(
     track_path: Path,
     operations: list[StemOperation],
     output_format: str,
+    export_range: tuple[float, float] | None = None,
+    edit_timeline=None,
 ):
     """Background job: separate stems, apply operations, save output."""
     job = _jobs[job_id]
@@ -399,10 +431,15 @@ def _run_job(
 
         # Step 3: Apply operations
         job.progress = 80
-        processed = apply_operations(original_audio, stems, sample_rate, operations)
+        processed = apply_operations(original_audio, stems, sample_rate, operations, edit_timeline)
 
-        # Step 4: Save output
-        output_filename = f"{job.track_id}_{job_id[:8]}.{output_format}"
+        # Step 4: Trim to export range if specified
+        if export_range:
+            processed = slice_audio(processed, sample_rate, export_range[0], export_range[1])
+
+        # Step 5: Save output
+        ext = "m4a" if output_format == "aac" else output_format
+        output_filename = f"{job.track_id}_{job_id[:8]}.{ext}"
         output_path = settings.output_dir / output_filename
         save_audio(processed, sample_rate, output_path, output_format)
 

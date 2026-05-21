@@ -4,7 +4,7 @@ from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException
 
 from app.config import settings
-from app.core.audio import get_audio_info, convert_to_wav
+from app.core.audio import get_audio_info, convert_to_wav, detect_bpm
 from app.core.models import TrackInfo
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,13 @@ async def upload_track(file: UploadFile = File(...)):
     # Extract audio metadata
     info = get_audio_info(wav_path)
 
+    # Detect BPM
+    try:
+        bpm = detect_bpm(wav_path)
+    except Exception:
+        logger.warning(f"BPM detection failed for {file.filename}")
+        bpm = 0.0
+
     track = TrackInfo(
         track_id=track_id,
         filename=file.filename,
@@ -75,6 +82,7 @@ async def upload_track(file: UploadFile = File(...)):
         channels=info["channels"],
         format=ext.lstrip("."),
         file_size_bytes=len(content),
+        bpm=bpm,
     )
     _tracks[track_id] = track
     return track

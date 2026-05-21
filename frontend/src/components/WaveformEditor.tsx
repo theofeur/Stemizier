@@ -5,7 +5,7 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import type { StemType, TimeRange, StemOperation } from "../types";
+import type { StemType, TimeRange, StemOperation, EditorMode, AudioRegion, EditClipboard } from "../types";
 import { STEM_COLORS, STEM_LABELS } from "../types";
 
 /* ── Constants ─────────────────────────────────────────────────────────── */
@@ -34,6 +34,13 @@ interface WaveformEditorProps {
   onSeek: (time: number) => void;
   onPlayPause: () => void;
   operations: StemOperation[];
+  stemsReady: boolean;
+  editorMode: EditorMode;
+  editTimeline: AudioRegion[] | null;
+  editClipboard: EditClipboard | null;
+  onEditCopy: () => void;
+  onEditPaste: () => void;
+  onEditCut: () => void;
 }
 
 /* ── Helpers ───────────────────────────────────────────────────────────── */
@@ -79,6 +86,13 @@ export default function WaveformEditor({
   onSeek,
   onPlayPause,
   operations,
+  stemsReady,
+  editorMode,
+  editTimeline: _editTimeline,
+  editClipboard,
+  onEditCopy,
+  onEditPaste,
+  onEditCut,
 }: WaveformEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -251,7 +265,8 @@ export default function WaveformEditor({
         ctx.font = "9px sans-serif";
         ctx.fillStyle = "#fff";
         ctx.textAlign = "center";
-        const label = `${op.action === "remove" ? "−" : "♪"} ${STEM_LABELS[op.stem].split(" ")[0]}`;
+        const icon = op.action === "remove" ? "−" : "♪";
+        const label = `${icon} ${STEM_LABELS[op.stem].split(" ")[0]}`;
         ctx.fillText(label, drawX + drawW / 2, opsY + 13);
       }
     }
@@ -468,6 +483,15 @@ export default function WaveformEditor({
       if (e.key === " " || e.code === "Space") {
         e.preventDefault();
         onPlayPause();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "c" && editorMode === "edit") {
+        e.preventDefault();
+        onEditCopy();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "v" && editorMode === "edit") {
+        e.preventDefault();
+        onEditPaste();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "x" && editorMode === "edit") {
+        e.preventDefault();
+        onEditCut();
       } else if (e.key === "+" || e.key === "=") {
         e.preventDefault();
         setZoom((z) => Math.min(MAX_ZOOM, z * 1.5));
@@ -483,7 +507,7 @@ export default function WaveformEditor({
         setViewOffset(0);
       }
     },
-    [onPlayPause, zoom, duration]
+    [onPlayPause, onEditCopy, onEditPaste, onEditCut, zoom, duration, editorMode]
   );
 
   /* ── Render ────────────────────────────────────────────────────────── */
@@ -549,6 +573,55 @@ export default function WaveformEditor({
           )}
         </div>
 
+        {/* Copy / Paste / Cut buttons (edit mode only) */}
+        {stemsReady && editorMode === "edit" && (
+          <div className="flex items-center gap-1 ml-3 border-l border-stem-border pl-3">
+            <button
+              onClick={() => onEditCopy()}
+              disabled={!region}
+              className="h-7 px-2 flex items-center gap-1 rounded bg-stem-surface border border-stem-border text-gray-400 hover:text-white hover:border-stem-accent/50 transition-colors text-xs disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Copy selection (Ctrl+C)"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+              Copy
+            </button>
+            <button
+              onClick={() => onEditCut()}
+              disabled={!region}
+              className="h-7 px-2 flex items-center gap-1 rounded bg-stem-surface border border-stem-border text-gray-400 hover:text-white hover:border-stem-accent/50 transition-colors text-xs disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Cut selection (Ctrl+X)"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
+                <line x1="20" y1="4" x2="8.12" y2="15.88"/>
+                <line x1="14.47" y1="14.48" x2="20" y2="20"/>
+                <line x1="8.12" y1="8.12" x2="12" y2="12"/>
+              </svg>
+              Cut
+            </button>
+            <button
+              onClick={() => onEditPaste()}
+              disabled={!editClipboard}
+              className="h-7 px-2 flex items-center gap-1 rounded bg-stem-surface border border-stem-border text-gray-400 hover:text-white hover:border-stem-accent/50 transition-colors text-xs disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Paste at cursor (Ctrl+V)"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+                <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+              </svg>
+              Paste
+            </button>
+            {editClipboard && (
+              <span className="text-[10px] text-gray-500 ml-1">
+                {editClipboard.duration.toFixed(1)}s copied
+              </span>
+            )}
+          </div>
+        )}
+
         {/* Stem legend */}
         {stemPeaks && (
           <div className="flex gap-3 ml-auto">
@@ -596,7 +669,9 @@ export default function WaveformEditor({
         {!region && duration > 0 && zoom <= 1 && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <span className="text-xs text-gray-600 bg-stem-bg/80 px-3 py-1 rounded">
-              Drag to select · Ctrl+Scroll to zoom · Scroll to pan
+              {editorMode === "edit"
+                ? "Drag to select \u00b7 Ctrl+C/X/V to copy/cut/paste \u00b7 Scroll to pan"
+                : "Drag to select \u00b7 Ctrl+Scroll to zoom \u00b7 Scroll to pan"}
             </span>
           </div>
         )}
